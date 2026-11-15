@@ -1,0 +1,14 @@
+# Kendi yerel config.toml dosyanda bu değeri değiştir; config.toml'u repoya koyma.
+database_path = "data/netnabiz.db"
+hash_salt = "BU_DEGERI_KENDI_CONFIG_DOSYANDA_DEGISTIR"
+api_key = "yerel-gelistirme-anahtari"
+campus_ip_ranges = []
+
+# true iken yerel adresler kampüs ağı sayılır.
+dev_mode = true
+
+# Ölçümlerde seçilebilecek örnek bölgeler.
+zones = [
+  "Kütüphane 1. kat Okuma salonu",
+  "Mühendislik B Blok 2. kat Derslik koridoru",
+]
