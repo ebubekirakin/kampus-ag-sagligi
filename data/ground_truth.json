@@ -1,0 +1,34 @@
+[
+  {
+    "scenario_id": "congestion",
+    "title": "Yoğun saatlerde tıkanıklık",
+    "zone": "Kütüphane 1. kat Okuma salonu",
+    "bssid": null,
+    "time_window": "Hafta içi 16:00-19:00",
+    "issue_type": "high_latency"
+  },
+  {
+    "scenario_id": "coverage_gap",
+    "title": "Kapsama eksikliği",
+    "zone": "Mühendislik B Blok 2. kat Derslik koridoru",
+    "bssid": null,
+    "time_window": "Sürekli",
+    "issue_type": "low_signal_low_throughput"
+  },
+  {
+    "scenario_id": "faulty_ap",
+    "title": "Arızalı erişim noktası",
+    "zone": "Yemekhane Zemin Kat",
+    "bssid": "02:00:00:03:00:02",
+    "time_window": "Sürekli",
+    "issue_type": "high_packet_loss"
+  },
+  {
+    "scenario_id": "sudden_outage",
+    "title": "Ani kısa süreli kesinti",
+    "zone": "Öğrenci İşleri Giriş Kat",
+    "bssid": null,
+    "time_window": "7. gün 14:00-15:00 UTC",
+    "issue_type": "service_outage"
+  }
+]

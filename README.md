@@ -24,3 +24,19 @@ uvicorn backend.main:app --reload
 ```
 
 Tarayıcıda API belgelerini `http://127.0.0.1:8000/docs` adresinden, sağlık kontrolünü `http://127.0.0.1:8000/health` adresinden aç. Sağlık kontrolü `{"status":"ok"}` yanıtını verir.
+
+## Simüle ölçümler
+
+Sunucu çalışırken, proje klasöründeki ikinci PowerShell penceresinde önce küçük bir deneme yap:
+
+```powershell
+python data/generate_simulated.py --days 1 --mode api
+```
+
+Ardından 14 günlük örnek veriyi üretmek için:
+
+```powershell
+python data/generate_simulated.py --days 14 --seed 42 --mode api
+```
+
+`--mode csv` seçeneği ölçümleri `data/simulated.csv` dosyasına yazar. Her çalıştırmada senaryo cevap anahtarı `data/ground_truth.json` dosyasına kaydedilir. Kayıtları `http://127.0.0.1:8000/measurements?is_simulated=1` adresinden kontrol edebilirsin.
