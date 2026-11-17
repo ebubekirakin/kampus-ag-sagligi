@@ -4,3 +4,10 @@ __pycache__/
 config.toml
 data/raw/
 .env
+
+# İstemciye özel yerel durum dosyaları
+client/client_config.toml
+client/device_id.txt
+client/last_zone.txt
+client/pending.jsonl
+

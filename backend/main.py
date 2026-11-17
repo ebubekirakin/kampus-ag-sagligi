@@ -5,9 +5,10 @@ NetNabız FastAPI Ana Sunucu Modülü.
 
 from datetime import datetime, timezone
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from backend.config import load_config
 from backend.database import get_connection, init_db
 
 app = FastAPI(
@@ -54,8 +55,18 @@ def health_check():
     return {"status": "ok"}
 
 
+@app.get("/zones")
+def list_zones():
+    """Tanımlı kampüs bölgelerinin listesini döner."""
+    config = load_config()
+    return config.get("zones", [])
+
+
 @app.post("/measurements", status_code=201)
-def create_measurement(measurement: MeasurementCreate):
+def create_measurement(
+    measurement: MeasurementCreate,
+    x_api_key: Optional[str] = Header(default=None),
+):
     """Yeni bir ölçüm kaydeder."""
     # Timestamp belirtilmemişse şu anki UTC zamanını kullan
     ts = measurement.timestamp or datetime.now(timezone.utc).isoformat()

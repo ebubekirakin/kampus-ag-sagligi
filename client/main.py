@@ -1,0 +1,292 @@
+"""
+NetNabız Gerçek Masaüstü Ölçüm İstemcisi.
+Kullanıcının bilgisayarından Wi-Fi bilgilerini ve ağ performansını ölçer,
+seçilen kampüs bölgesiyle eşleştirip yerel FastAPI sunucusuna gönderir.
+Sunucu kapalıysa ölçümleri 'pending.jsonl' dosyasına biriktirir.
+"""
+
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+from pathlib import Path
+import sys
+import time
+import tomllib
+import uuid
+import httpx
+
+from client.network_tests import run_network_tests
+from client.wifi_info import get_wifi_info
+
+# İstemci klasör yolu
+CLIENT_DIR = Path(__file__).resolve().parent
+
+
+def load_client_config() -> dict:
+    """İstemci yapılandırma dosyasını yükler."""
+    config_file = CLIENT_DIR / "client_config.toml"
+    if not config_file.exists():
+        config_file = CLIENT_DIR / "client_config.example.toml"
+
+    with open(config_file, "rb") as f:
+        return tomllib.load(f)
+
+
+def get_or_create_device_id() -> str:
+    """
+    Cihaz için kalıcı, rastgele bir UUID üretir veya mevcut olanı okur.
+    Gerçek cihaz MAC/IP adresi yerine bu kimlik kullanılır ve sunucuya hash'lenerek iletilir.
+    """
+    device_file = CLIENT_DIR / "device_id.txt"
+    if device_file.exists():
+        device_id = device_file.read_text(encoding="utf-8").strip()
+        if device_id:
+            return device_id
+
+    new_id = str(uuid.uuid4())
+    device_file.write_text(new_id, encoding="utf-8")
+    return new_id
+
+
+def select_zone(server_url: str) -> str:
+    """
+    Kullanıcıya bölgeleri numaralı liste olarak sunar ve seçim yaptırır.
+    Son seçimi 'last_zone.txt' dosyasına kaydeder.
+    """
+    zones = []
+    # 1. Sunucudan bölge listesini almayı dene
+    try:
+        resp = httpx.get(f"{server_url}/zones", timeout=3.0)
+        if resp.status_code == 200:
+            zones = resp.json()
+    except Exception:
+        pass
+
+    # Sunucuya ulaşılamazsa veya liste boşsa varsayılan bölgeleri kullan
+    if not zones:
+        zones = [
+            "Kütüphane 1. kat Okuma salonu",
+            "Mühendislik B Blok 2. kat Derslik koridoru",
+            "Yemekhane Zemin Kat",
+            "Öğrenci İşleri Giriş Kat",
+        ]
+
+    last_zone_file = CLIENT_DIR / "last_zone.txt"
+    last_zone = None
+    if last_zone_file.exists():
+        last_zone = last_zone_file.read_text(encoding="utf-8").strip()
+
+    print("\n--- Ölçüm Yapılacak Bölgeyi Seçin ---")
+    for idx, z in enumerate(zones, start=1):
+        marker = " (Son Seçim)" if z == last_zone else ""
+        print(f"  [{idx}] {z}{marker}")
+
+    prompt_text = "Seçiminiz"
+    if last_zone:
+        prompt_text += f" (Varsayılan: '{last_zone}', Enter tuşuna basabilirsiniz)"
+    prompt_text += ": "
+
+    selected = None
+    while not selected:
+        try:
+            user_input = input(prompt_text).strip()
+            if not user_input and last_zone:
+                selected = last_zone
+                break
+            if user_input.isdigit():
+                num = int(user_input)
+                if 1 <= num <= len(zones):
+                    selected = zones[num - 1]
+                    break
+            # Doğrudan isim girilmişse
+            if user_input in zones:
+                selected = user_input
+                break
+            print("Geçersiz seçim. Lütfen listedeki bir numarayı girin.")
+        except (EOFError, KeyboardInterrupt):
+            selected = last_zone or zones[0]
+            print(f"\nOtomatik seçim: {selected}")
+            break
+
+    last_zone_file.write_text(selected, encoding="utf-8")
+    return selected
+
+
+def parse_building_floor(zone_name: str) -> tuple[str, str]:
+    """Bölge isminden bina ve kat ayrıştırması yapar."""
+    parts = zone_name.split()
+    building = parts[0] if parts else "Kampüs"
+    floor = "Zemin Kat"
+    for marker in ("1.", "2.", "3.", "4.", "Zemin", "Giriş"):
+        if marker.lower() in zone_name.lower():
+            floor = f"{marker} Kat"
+            break
+    return building, floor
+
+
+def send_pending_measurements(server_url: str, api_key: str, debug: bool = False):
+    """
+    Daha önce sunucu kapalıyken 'pending.jsonl' dosyasına yazılmış
+    bekleyen ölçümleri sunucuya yeniden göndermeyi dener.
+    """
+    pending_file = CLIENT_DIR / "pending.jsonl"
+    if not pending_file.exists():
+        return
+
+    lines = pending_file.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return
+
+    print(f"[*] Çevrimdışı kuyrukta {len(lines)} adet bekleyen ölçüm bulundu, gönderiliyor...")
+    still_pending = []
+    sent_count = 0
+
+    headers = {"Content-Type": "application/json", "X-API-Key": api_key}
+
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+            resp = httpx.post(f"{server_url}/measurements", json=payload, headers=headers, timeout=5.0)
+            if resp.status_code in (200, 201):
+                sent_count += 1
+            else:
+                still_pending.append(line)
+        except Exception:
+            still_pending.append(line)
+
+    if still_pending:
+        pending_file.write_text("\n".join(still_pending) + "\n", encoding="utf-8")
+        if debug:
+            print(f"[!] {len(still_pending)} adet ölçüm halen bekliyor.")
+    else:
+        pending_file.unlink(missing_ok=True)
+        print(f"[+] Bekleyen {sent_count} ölçümün tamamı sunucuya başarıyla aktarıldı!")
+
+
+def save_pending_measurement(payload: dict):
+    """Sunucuya ulaşılamadığında ölçümü kuyruk dosyasına ekler."""
+    pending_file = CLIENT_DIR / "pending.jsonl"
+    with open(pending_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    print("  [!] Sunucuya ulaşılamadı. Ölçüm 'client/pending.jsonl' dosyasına kaydedildi (kuyruk).")
+
+
+def perform_single_measurement(
+    config: dict,
+    zone: str,
+    device_hash: str,
+    debug: bool = False,
+):
+    """Tek bir Wi-Fi ve ağ testi turu gerçekleştirip sonucu sunucuya gönderir."""
+    server_url = config.get("server_url", "http://127.0.0.1:8000")
+    api_key = config.get("api_key", "yerel-gelistirme-anahtari")
+
+    print("\n" + "=" * 65)
+    print(f"[*] Ölçüm Başlatılıyor... [{datetime.now().strftime('%H:%M:%S')}]")
+    print(f"    Seçilen Bölge: {zone}")
+
+    # 1. Wi-Fi bilgilerini oku
+    print("[1/2] Wi-Fi bağdaştırıcı bilgileri taranıyor...")
+    wifi = get_wifi_info(debug=debug)
+
+    # 2. Ağ performansını test et
+    print("[2/2] Gecikme, paket kaybı ve hız testleri yapılıyor...")
+    net = run_network_tests(config, debug=debug)
+
+    building, floor = parse_building_floor(zone)
+
+    # Değerleri güvenli biçimde hazırla (None ise sıfır/boşluk koruması)
+    rtt = net["rtt_ms"] if net["rtt_ms"] is not None else 0.0
+    loss = net["loss_pct"] if net["loss_pct"] is not None else 100.0
+    down = net["down_mbps"] if net["down_mbps"] is not None else 0.0
+    up = net["up_mbps"] if net["up_mbps"] is not None else 0.0
+
+    payload = {
+        "device_hash": device_hash,
+        "source": "desktop",
+        "ssid": wifi.get("ssid"),
+        "bssid": wifi.get("bssid"),
+        "rssi_dbm": wifi.get("rssi_dbm"),
+        "rtt_ms": rtt,
+        "loss_pct": loss,
+        "down_mbps": down,
+        "up_mbps": up,
+        "building": building,
+        "floor": floor,
+        "zone": zone,
+        "campus_confidence": 1.0,
+        "is_verified": 1,
+        "is_simulated": 0,  # Gerçek ölçüm
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # İnsan okunabilir özet çıktısı
+    sig_str = f"{wifi.get('rssi_dbm')} dBm" if wifi.get("rssi_dbm") is not None else "Yok"
+    rtt_str = f"{rtt:.1f} ms" if net["rtt_ms"] is not None else "Hata"
+    down_str = f"{down:.2f} Mbps" if net["down_mbps"] is not None else "Hata"
+    up_str = f"{up:.2f} Mbps" if net["up_mbps"] is not None else "Hata"
+
+    print("-" * 65)
+    print(
+        f"  Gecikme: {rtt_str} | Kayıp: %{loss:.0f} | İndirme: {down_str} | "
+        f"Yükleme: {up_str} | Sinyal: {sig_str}"
+    )
+    print(f"  SSID: {wifi.get('ssid') or 'Bağlı Değil'} | BSSID: {wifi.get('bssid') or 'Yok'}")
+    print("-" * 65)
+
+    # 3. Sunucuya gönder
+    headers = {"Content-Type": "application/json", "X-API-Key": api_key}
+    try:
+        resp = httpx.post(f"{server_url}/measurements", json=payload, headers=headers, timeout=5.0)
+        if resp.status_code in (200, 201):
+            print(f"  [+] Ölçüm sunucuya kaydedildi (ID: {resp.json().get('id')})")
+        else:
+            print(f"  [!] Sunucu hata döndürdü ({resp.status_code}): {resp.text}")
+            save_pending_measurement(payload)
+    except Exception as exc:
+        if debug:
+            print(f"  [DEBUG Bağlantı Hatası] {exc}")
+        save_pending_measurement(payload)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NetNabız Gerçek Masaüstü Ölçüm İstemcisi")
+    parser.add_argument("--repeat", type=int, default=1, help="Ölçüm tekrar sayısı (varsayılan: 1)")
+    parser.add_argument("--interval", type=int, default=60, help="Tekrarlar arası bekleme saniyesi (varsayılan: 60)")
+    parser.add_argument("--debug", action="store_true", help="Detaylı hata ayıklama çıktılarını göster")
+    args = parser.parse_args()
+
+    config = load_client_config()
+    server_url = config.get("server_url", "http://127.0.0.1:8000")
+    api_key = config.get("api_key", "yerel-gelistirme-anahtari")
+
+    # Cihaz kimliği (UUID hash)
+    raw_device_id = get_or_create_device_id()
+    device_hash = hashlib.sha256(raw_device_id.encode()).hexdigest()
+
+    # Kullanıcıdan bölge seçimi al
+    selected_zone = select_zone(server_url)
+
+    # Varsa önce çevrimdışı kuyruktaki bekleyenleri gönder
+    send_pending_measurements(server_url, api_key, debug=args.debug)
+
+    # Ölçüm döngüsü
+    for round_idx in range(1, args.repeat + 1):
+        perform_single_measurement(
+            config=config,
+            zone=selected_zone,
+            device_hash=device_hash,
+            debug=args.debug,
+        )
+        if round_idx < args.repeat:
+            print(f"\nSonraki ölçüm için {args.interval} saniye bekleniyor (Ctrl+C ile durdurabilirsiniz)...")
+            time.sleep(args.interval)
+
+    print("\n[+] İstemci ölçüm işlemlerini tamamladı.\n")
+
+
+if __name__ == "__main__":
+    main()

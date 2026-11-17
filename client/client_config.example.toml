@@ -1,0 +1,16 @@
+# NetNabız İstemci Yapılandırma Dosyası
+# Bu dosyayı 'client_config.toml' olarak kopyalayıp yerel ayarlarınızı yapabilirsiniz.
+
+# NetNabız FastAPI sunucu adresi
+server_url = "http://127.0.0.1:8000"
+
+# Sunucuyla paylaşılan erişim anahtarı
+api_key = "yerel-gelistirme-anahtari"
+
+# Gecikme (ping) testi için TCP hedefi (host:port)
+# ICMP ping yerine standart TCP el sıkışması kullanılır (Windows yönetici izni gerekmez)
+latency_target = "1.1.1.1:443"
+
+# Hız testleri için ücretsiz test uç noktaları
+download_url = "https://speed.cloudflare.com/__down?bytes=5000000"
+upload_url = "https://speed.cloudflare.com/__up"
