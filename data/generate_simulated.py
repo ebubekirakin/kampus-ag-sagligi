@@ -245,8 +245,26 @@ def export_csv(measurements: list[dict], filepath: Path) -> None:
 
 def send_to_api(measurements: list[dict], api_url: str) -> tuple[int, int]:
     """Her ölçümü POST eder ve başarılı/hatalı kayıt sayılarını döndürür."""
+    total = len(measurements)
+    if total == 0:
+        return 0, 0
+
+    # Sunucunun çalışıp çalışmadığını başlangıçta kontrol et
+    base_url = api_url.rsplit("/", 1)[0]
+    health_url = f"{base_url}/health"
+    try:
+        with urllib.request.urlopen(health_url, timeout=3) as resp:
+            if resp.status != 200:
+                raise ValueError("Sunucu sağlık kontrolü başarısız.")
+    except Exception:
+        print(f"\n[!] HATA: '{api_url}' adresindeki sunucuya ulaşılamadı!")
+        print("[!] Lütfen önce başka bir terminal penceresinde sunucuyu başlatın:")
+        print("    uvicorn backend.main:app --reload\n")
+        return 0, total
+
+    print(f"[*] API'ye aktarılıyor: {api_url} ({total} adet ölçüm)...")
     success = 0
-    for item in measurements:
+    for index, item in enumerate(measurements, start=1):
         request = urllib.request.Request(
             api_url,
             data=json.dumps(item).encode("utf-8"),
@@ -255,10 +273,16 @@ def send_to_api(measurements: list[dict], api_url: str) -> tuple[int, int]:
         )
         try:
             with urllib.request.urlopen(request, timeout=5) as response:
-                success += response.status in (200, 201)
+                if response.status in (200, 201):
+                    success += 1
         except (urllib.error.URLError, TimeoutError):
             continue
-    return success, len(measurements) - success
+
+        # Büyük veri aktarımında ilerleme bilgisi ver
+        if total > 50 and (index % 250 == 0 or index == total):
+            print(f"  -> {index}/{total} ölçüm gönderildi...")
+
+    return success, total - success
 
 
 def print_summary(measurements: list[dict], ground_truth: list[dict], result: str) -> None:
@@ -274,9 +298,21 @@ def print_summary(measurements: list[dict], ground_truth: list[dict], result: st
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="NetNabız simüle ölçüm üreticisi")
-    parser.add_argument("--days", type=int, default=14, help="Üretilecek gün sayısı")
-    parser.add_argument("--seed", type=int, default=42, help="Tekrarlanabilirlik tohumu")
-    parser.add_argument("--mode", choices=("api", "csv"), default="api")
+    parser.add_argument("--days", type=int, default=14, help="Üretilecek gün sayısı (varsayılan: 14)")
+    parser.add_argument("--seed", type=int, default=42, help="Tekrarlanabilirlik tohumu (varsayılan: 42)")
+    parser.add_argument("--mode", choices=("api", "csv"), default="api", help="Çıktı modu (api veya csv)")
+    parser.add_argument(
+        "--api-url",
+        type=str,
+        default="http://127.0.0.1:8000/measurements",
+        help="FastAPI measurements uç noktası",
+    )
+    parser.add_argument(
+        "--csv-path",
+        type=str,
+        default="data/simulated.csv",
+        help="CSV modu için dosya yolu",
+    )
     args = parser.parse_args()
 
     if args.days < 1:
@@ -286,11 +322,11 @@ def main() -> None:
     save_ground_truth(scenarios, BASE_DIR / "data" / "ground_truth.json")
 
     if args.mode == "csv":
-        csv_path = BASE_DIR / "data" / "simulated.csv"
+        csv_path = BASE_DIR / args.csv_path
         export_csv(measurements, csv_path)
         result = f"CSV dosyası yazıldı: {csv_path}"
     else:
-        success, errors = send_to_api(measurements, "http://127.0.0.1:8000/measurements")
+        success, errors = send_to_api(measurements, args.api_url)
         result = f"API kayıtları: {success} başarılı, {errors} hatalı"
 
     print_summary(measurements, scenarios, result)

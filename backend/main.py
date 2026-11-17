@@ -24,15 +24,15 @@ class MeasurementCreate(BaseModel):
     ssid: Optional[str] = Field(default=None, description="Bağlı bulunulan Wi-Fi adı")
     bssid: Optional[str] = Field(default=None, description="Modem/Erişim noktası MAC adresi")
     rssi_dbm: Optional[float] = Field(default=None, description="Sinyal gücü (dBm)")
-    rtt_ms: float = Field(..., description="Gecikme (ping süresi ms)")
-    loss_pct: float = Field(..., description="Paket kaybı yüzdesi (0-100)")
-    down_mbps: float = Field(..., description="İndirme hızı (Mbps)")
-    up_mbps: float = Field(..., description="Yükleme hızı (Mbps)")
+    rtt_ms: float = Field(..., ge=0.0, description="Gecikme (ping süresi ms)")
+    loss_pct: float = Field(..., ge=0.0, le=100.0, description="Paket kaybı yüzdesi (0-100)")
+    down_mbps: float = Field(..., ge=0.0, description="İndirme hızı (Mbps)")
+    up_mbps: float = Field(..., ge=0.0, description="Yükleme hızı (Mbps)")
     building: Optional[str] = Field(default=None, description="Bina adı")
     floor: Optional[str] = Field(default=None, description="Kat bilgisi")
     zone: str = Field(..., description="Bölge adı")
-    campus_confidence: float = Field(default=1.0, description="Kampüs ağı güven skoru (0.0 - 1.0)")
-    is_verified: int = Field(default=1, description="Doğrulanmış kampüs ölçümü mü (1 veya 0)")
+    campus_confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Kampüs ağı güven skoru (0.0 - 1.0)")
+    is_verified: int = Field(default=1, ge=0, le=1, description="Doğrulanmış kampüs ölçümü mü (1 veya 0)")
     is_simulated: int = Field(
         default=0,
         ge=0,

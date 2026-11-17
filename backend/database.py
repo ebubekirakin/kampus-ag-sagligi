@@ -20,7 +20,7 @@ def get_db_path() -> Path:
 @contextmanager
 def get_connection():
     """SQLite bağlantısını açar, işlemi tamamlar ve bağlantıyı kapatır."""
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=10.0)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
