@@ -9,6 +9,7 @@ from unittest.mock import patch
 from datetime import datetime
 
 from backend import database
+from backend.config import load_config
 from data.generate_simulated import (
     generate_measurements,
     get_ground_truth_scenarios,
@@ -97,33 +98,50 @@ class TestSimulation(unittest.TestCase):
 
 
 class TestDatabaseMigration(unittest.TestCase):
-    def test_old_measurements_table_gets_is_simulated_column(self):
+    def test_old_table_migrates_without_losing_rows_and_accepts_missing_metrics(self):
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "legacy.db"
             connection = sqlite3.connect(db_path)
-            connection.execute("CREATE TABLE measurements (id INTEGER PRIMARY KEY)")
+            connection.execute("""
+                CREATE TABLE measurements (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_hash TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'desktop',
+                    ssid TEXT, bssid TEXT, rssi_dbm REAL,
+                    rtt_ms REAL NOT NULL, loss_pct REAL NOT NULL,
+                    down_mbps REAL NOT NULL, up_mbps REAL NOT NULL,
+                    building TEXT, floor TEXT, zone TEXT NOT NULL,
+                    campus_confidence REAL NOT NULL DEFAULT 1.0,
+                    is_verified INTEGER NOT NULL DEFAULT 1,
+                    timestamp TEXT NOT NULL
+                )
+            """)
+            connection.execute(
+                "INSERT INTO measurements "
+                "(device_hash, rtt_ms, loss_pct, down_mbps, up_mbps, zone, timestamp) "
+                "VALUES ('existing-hash', 23, 0, 40, 10, 'Bölge', '2026-11-18T10:00:00Z')"
+            )
+            connection.commit()
             connection.close()
 
             with patch.object(database, "get_db_path", return_value=db_path):
                 database.init_db()
-                constraint_raised = False
                 with database.get_connection() as connection:
-                    column = connection.execute(
-                        "PRAGMA table_info(measurements)"
-                    ).fetchall()
                     row = connection.execute(
-                        "INSERT INTO measurements (id) VALUES (1) RETURNING is_simulated"
+                        "SELECT device_hash, rtt_ms, is_simulated FROM measurements"
                     ).fetchone()
-                    try:
-                        connection.execute(
-                            "INSERT INTO measurements (id, is_simulated) VALUES (2, 2)"
-                        )
-                    except sqlite3.IntegrityError:
-                        constraint_raised = True
+                    connection.execute(
+                        "INSERT INTO measurements "
+                        "(device_hash, zone, timestamp, rtt_ms) VALUES (?, ?, ?, ?)",
+                        ("new-hash", "Bölge", "2026-11-18T10:01:00Z", None),
+                    )
+                    null_metric = connection.execute(
+                        "SELECT rtt_ms, is_simulated FROM measurements WHERE device_hash = ?",
+                        ("new-hash",),
+                    ).fetchone()
 
-            self.assertIn("is_simulated", {item["name"] for item in column})
-            self.assertEqual(row[0], 0)
-            self.assertTrue(constraint_raised)
+            self.assertEqual(tuple(row), ("existing-hash", 23.0, 0))
+            self.assertEqual(tuple(null_metric), (None, 0))
 
 
 class TestBackendEndpoints(unittest.TestCase):
@@ -140,17 +158,23 @@ class TestBackendEndpoints(unittest.TestCase):
                 with TestClient(app) as client:
                     payload = {
                         "device_hash": "test-hash",
-                        "rtt_ms": 20,
-                        "loss_pct": 0,
-                        "down_mbps": 50,
-                        "up_mbps": 20,
+                        "rtt_ms": None,
+                        "loss_pct": None,
+                        "down_mbps": None,
+                        "up_mbps": None,
                         "zone": "Test bölgesi",
                     }
-                    response = client.post("/measurements", json=payload)
+                    unauthorized = client.post("/measurements", json=payload)
+                    self.assertEqual(unauthorized.status_code, 401)
+                    api_key = load_config()["api_key"]
+                    response = client.post(
+                        "/measurements", json=payload, headers={"X-API-Key": api_key}
+                    )
                     self.assertEqual(response.status_code, 201)
                     rows = client.get("/measurements?is_simulated=0").json()
                     self.assertEqual(len(rows), 1)
                     self.assertEqual(rows[0]["is_simulated"], 0)
+                    self.assertIsNone(rows[0]["rtt_ms"])
 
 
 if __name__ == "__main__":

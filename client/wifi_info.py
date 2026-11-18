@@ -29,6 +29,8 @@ def parse_netsh_output(raw_output: str) -> dict:
     if not raw_output or not raw_output.strip():
         return result
 
+    state_was_present = False
+
     for line in raw_output.splitlines():
         if ":" not in line:
             continue
@@ -43,6 +45,7 @@ def parse_netsh_output(raw_output: str) -> dict:
         elif key.upper() == "BSSID":
             result["bssid"] = val if val else None
         elif key.lower() in ("state", "durum"):
+            state_was_present = True
             result["state"] = val.lower()
             if val.lower() in ("connected", "bağlı"):
                 result["connected"] = True
@@ -57,14 +60,15 @@ def parse_netsh_output(raw_output: str) -> dict:
             except ValueError:
                 pass
 
-    # Durum bilgisi satırı yoksa ama geçerli bir SSID varsa bağlı kabul et
-    if not result["connected"] and result["ssid"]:
+    # Bazı Windows sürümleri durum satırını vermeyebilir; açıkça kopuk demediyse SSID kullan.
+    if not state_was_present and result["ssid"]:
         result["connected"] = True
 
     # Eğer bağlantı kopuksa değerleri temizle
     if not result["connected"]:
         result["ssid"] = None
         result["bssid"] = None
+        result["signal_pct"] = None
         result["rssi_dbm"] = None
 
     return result
@@ -86,6 +90,8 @@ def get_wifi_info(debug: bool = False) -> dict:
         )
         # Windows konsol kodlaması (Türkçe karakterler için cp857 veya cp1254 olabilmektedir)
         raw_text = process.stdout.decode(system_encoding, errors="replace")
+        if process.stderr:
+            raw_text += "\n" + process.stderr.decode(system_encoding, errors="replace")
     except Exception as exc:
         raw_text = f"Hata: {str(exc)}"
 
@@ -97,14 +103,13 @@ def get_wifi_info(debug: bool = False) -> dict:
     info = parse_netsh_output(raw_text)
 
     # Kullanıcıya bilgilendirme / uyarı (bilgi okunamadıysa)
-    if not info["connected"]:
+    if not info["connected"] or not info["ssid"] or not info["bssid"] or info["rssi_dbm"] is None:
         # Yaygın Windows 10/11 konum/servis kısıtlamaları uyarısı
         warning_msg = (
-            "[!] Wi-Fi bilgisi alınamadı (Wi-Fi kapalı, kablolu ağ veya erişim kısıtlı olabilir).\n"
+            "[!] Wi-Fi bilgisi eksik veya alınamadı (Wi-Fi kapalı, kablolu ağ ya da erişim kısıtlı olabilir).\n"
             "    İpucu: Windows Ayarlar > Gizlilik ve Güvenlik > Konum servislerinin açık olduğundan emin olun."
         )
-        if debug:
-            print(warning_msg)
+        print(warning_msg)
 
     return info
 

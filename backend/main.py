@@ -5,6 +5,7 @@ NetNabız FastAPI Ana Sunucu Modülü.
 
 from datetime import datetime, timezone
 from typing import List, Optional
+from secrets import compare_digest
 from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -25,10 +26,10 @@ class MeasurementCreate(BaseModel):
     ssid: Optional[str] = Field(default=None, description="Bağlı bulunulan Wi-Fi adı")
     bssid: Optional[str] = Field(default=None, description="Modem/Erişim noktası MAC adresi")
     rssi_dbm: Optional[float] = Field(default=None, description="Sinyal gücü (dBm)")
-    rtt_ms: float = Field(..., ge=0.0, description="Gecikme (ping süresi ms)")
-    loss_pct: float = Field(..., ge=0.0, le=100.0, description="Paket kaybı yüzdesi (0-100)")
-    down_mbps: float = Field(..., ge=0.0, description="İndirme hızı (Mbps)")
-    up_mbps: float = Field(..., ge=0.0, description="Yükleme hızı (Mbps)")
+    rtt_ms: Optional[float] = Field(default=None, ge=0.0, description="Gecikme (ping süresi ms)")
+    loss_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0, description="Paket kaybı yüzdesi (0-100)")
+    down_mbps: Optional[float] = Field(default=None, ge=0.0, description="İndirme hızı (Mbps)")
+    up_mbps: Optional[float] = Field(default=None, ge=0.0, description="Yükleme hızı (Mbps)")
     building: Optional[str] = Field(default=None, description="Bina adı")
     floor: Optional[str] = Field(default=None, description="Kat bilgisi")
     zone: str = Field(..., description="Bölge adı")
@@ -68,6 +69,13 @@ def create_measurement(
     x_api_key: Optional[str] = Header(default=None),
 ):
     """Yeni bir ölçüm kaydeder."""
+    # Paylaşılan anahtar yerel ayarlardan okunur ve sabit zamanlı karşılaştırılır.
+    expected_key = load_config().get("api_key", "")
+    supplied_key = x_api_key.encode("utf-8") if x_api_key else b""
+    expected_bytes = expected_key.encode("utf-8") if expected_key else b""
+    if not expected_bytes or not supplied_key or not compare_digest(supplied_key, expected_bytes):
+        raise HTTPException(status_code=401, detail="Geçersiz veya eksik API anahtarı.")
+
     # Timestamp belirtilmemişse şu anki UTC zamanını kullan
     ts = measurement.timestamp or datetime.now(timezone.utc).isoformat()
 

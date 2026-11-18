@@ -76,6 +76,8 @@ def select_zone(server_url: str) -> str:
     last_zone = None
     if last_zone_file.exists():
         last_zone = last_zone_file.read_text(encoding="utf-8").strip()
+        if last_zone not in zones:
+            last_zone = None
 
     print("\n--- Ölçüm Yapılacak Bölgeyi Seçin ---")
     for idx, z in enumerate(zones, start=1):
@@ -105,12 +107,30 @@ def select_zone(server_url: str) -> str:
                 break
             print("Geçersiz seçim. Lütfen listedeki bir numarayı girin.")
         except (EOFError, KeyboardInterrupt):
-            selected = last_zone or zones[0]
+            selected = last_zone if last_zone in zones else zones[0]
             print(f"\nOtomatik seçim: {selected}")
             break
 
     last_zone_file.write_text(selected, encoding="utf-8")
     return selected
+
+
+def classify_campus(wifi: dict, config: dict) -> tuple[float, int]:
+    """Yerel izin listesiyle ağı sınıflandırır; eşleşme yoksa doğrulanmamış bırakır."""
+    if not wifi.get("connected"):
+        return 0.0, 0
+
+    known_ssids = {item.casefold() for item in config.get("campus_ssids", [])}
+    known_bssids = {item.upper() for item in config.get("campus_bssids", [])}
+    ssid_matches = wifi.get("ssid", "").casefold() in known_ssids if wifi.get("ssid") else False
+    bssid_matches = wifi.get("bssid", "").upper() in known_bssids if wifi.get("bssid") else False
+
+    # Yalnızca SSID eşleşmesi kolay taklit edilebilir; doğrulama için iki alan da eşleşmeli.
+    if ssid_matches and bssid_matches:
+        return 0.95, 1
+    if ssid_matches or bssid_matches:
+        return 0.6, 0
+    return 0.25, 0
 
 
 def parse_building_floor(zone_name: str) -> tuple[str, str]:
@@ -198,11 +218,7 @@ def perform_single_measurement(
 
     building, floor = parse_building_floor(zone)
 
-    # Değerleri güvenli biçimde hazırla (None ise sıfır/boşluk koruması)
-    rtt = net["rtt_ms"] if net["rtt_ms"] is not None else 0.0
-    loss = net["loss_pct"] if net["loss_pct"] is not None else 100.0
-    down = net["down_mbps"] if net["down_mbps"] is not None else 0.0
-    up = net["up_mbps"] if net["up_mbps"] is not None else 0.0
+    campus_confidence, is_verified = classify_campus(wifi, config)
 
     payload = {
         "device_hash": device_hash,
@@ -210,28 +226,29 @@ def perform_single_measurement(
         "ssid": wifi.get("ssid"),
         "bssid": wifi.get("bssid"),
         "rssi_dbm": wifi.get("rssi_dbm"),
-        "rtt_ms": rtt,
-        "loss_pct": loss,
-        "down_mbps": down,
-        "up_mbps": up,
+        "rtt_ms": net["rtt_ms"],
+        "loss_pct": net["loss_pct"],
+        "down_mbps": net["down_mbps"],
+        "up_mbps": net["up_mbps"],
         "building": building,
         "floor": floor,
         "zone": zone,
-        "campus_confidence": 1.0,
-        "is_verified": 1,
+        "campus_confidence": campus_confidence,
+        "is_verified": is_verified,
         "is_simulated": 0,  # Gerçek ölçüm
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
     # İnsan okunabilir özet çıktısı
-    sig_str = f"{wifi.get('rssi_dbm')} dBm" if wifi.get("rssi_dbm") is not None else "Yok"
-    rtt_str = f"{rtt:.1f} ms" if net["rtt_ms"] is not None else "Hata"
-    down_str = f"{down:.2f} Mbps" if net["down_mbps"] is not None else "Hata"
-    up_str = f"{up:.2f} Mbps" if net["up_mbps"] is not None else "Hata"
+    sig_str = f"{wifi.get('rssi_dbm')} dBm" if wifi.get("rssi_dbm") is not None else "Ölçülemedi"
+    rtt_str = f"{net['rtt_ms']:.1f} ms" if net["rtt_ms"] is not None else "Ölçülemedi"
+    loss_str = f"%{net['loss_pct']:.0f}" if net["loss_pct"] is not None else "Ölçülemedi"
+    down_str = f"{net['down_mbps']:.2f} Mbps" if net["down_mbps"] is not None else "Ölçülemedi"
+    up_str = f"{net['up_mbps']:.2f} Mbps" if net["up_mbps"] is not None else "Ölçülemedi"
 
     print("-" * 65)
     print(
-        f"  Gecikme: {rtt_str} | Kayıp: %{loss:.0f} | İndirme: {down_str} | "
+        f"  Gecikme: {rtt_str} | Kayıp: {loss_str} | İndirme: {down_str} | "
         f"Yükleme: {up_str} | Sinyal: {sig_str}"
     )
     print(f"  SSID: {wifi.get('ssid') or 'Bağlı Değil'} | BSSID: {wifi.get('bssid') or 'Yok'}")
@@ -258,6 +275,10 @@ def main():
     parser.add_argument("--interval", type=int, default=60, help="Tekrarlar arası bekleme saniyesi (varsayılan: 60)")
     parser.add_argument("--debug", action="store_true", help="Detaylı hata ayıklama çıktılarını göster")
     args = parser.parse_args()
+    if args.repeat < 1:
+        parser.error("--repeat en az 1 olmalıdır.")
+    if args.interval < 0:
+        parser.error("--interval negatif olamaz.")
 
     config = load_client_config()
     server_url = config.get("server_url", "http://127.0.0.1:8000")

@@ -33,7 +33,7 @@ def get_connection():
 
 
 def init_db():
-    """Ölçüm tablosunu oluşturur ve eski tabloya yeni sütunları ekler."""
+    """Tabloyu hazırlar ve eski, zorunlu ağ alanlarını NULL kabul edecek biçimde taşır."""
     create_table_sql = """
     CREATE TABLE IF NOT EXISTS measurements (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,10 +42,10 @@ def init_db():
         ssid TEXT,
         bssid TEXT,
         rssi_dbm REAL,
-        rtt_ms REAL NOT NULL,
-        loss_pct REAL NOT NULL,
-        down_mbps REAL NOT NULL,
-        up_mbps REAL NOT NULL,
+        rtt_ms REAL,
+        loss_pct REAL,
+        down_mbps REAL,
+        up_mbps REAL,
         building TEXT,
         floor TEXT,
         zone TEXT NOT NULL,
@@ -57,12 +57,48 @@ def init_db():
     """
     with get_connection() as conn:
         conn.execute(create_table_sql)
-        # CREATE TABLE IF NOT EXISTS eski tabloları değiştirmez; eksik alanları ekle.
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(measurements)")}
-        if "is_simulated" not in columns:
+        table_info = {
+            row["name"]: row for row in conn.execute("PRAGMA table_info(measurements)")
+        }
+        # Eski tabloya simülasyon işaretini varsayılanı 0 olacak şekilde ekle.
+        if "is_simulated" not in table_info:
             conn.execute(
                 "ALTER TABLE measurements "
                 "ADD COLUMN is_simulated INTEGER NOT NULL DEFAULT 0 "
                 "CHECK (is_simulated IN (0, 1))"
             )
-        conn.commit()
+            table_info = {
+                row["name"]: row for row in conn.execute("PRAGMA table_info(measurements)")
+            }
+
+        # SQLite mevcut sütundaki NOT NULL şartını kaldıramaz; tabloyu veri kaybı olmadan yenile.
+        nullable_fields = ("rtt_ms", "loss_pct", "down_mbps", "up_mbps")
+        needs_rebuild = any(table_info[field]["notnull"] for field in nullable_fields)
+        if needs_rebuild:
+            conn.execute("ALTER TABLE measurements RENAME TO measurements_legacy")
+            conn.execute(create_table_sql)
+            new_columns = [
+                "id", "device_hash", "source", "ssid", "bssid", "rssi_dbm",
+                "rtt_ms", "loss_pct", "down_mbps", "up_mbps", "building", "floor",
+                "zone", "campus_confidence", "is_verified", "is_simulated", "timestamp",
+            ]
+            old_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(measurements_legacy)")
+            }
+            defaults = {
+                "source": "'desktop'",
+                "campus_confidence": "1.0",
+                "is_verified": "1",
+                "is_simulated": "0",
+            }
+            expressions = [
+                column if column in old_columns else defaults.get(column, "NULL")
+                for column in new_columns
+            ]
+            column_list = ", ".join(new_columns)
+            value_list = ", ".join(expressions)
+            conn.execute(
+                f"INSERT INTO measurements ({column_list}) "
+                f"SELECT {value_list} FROM measurements_legacy"
+            )
+            conn.execute("DROP TABLE measurements_legacy")

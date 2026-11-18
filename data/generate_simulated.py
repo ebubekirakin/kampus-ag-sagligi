@@ -243,11 +243,13 @@ def export_csv(measurements: list[dict], filepath: Path) -> None:
             writer.writerows(measurements)
 
 
-def send_to_api(measurements: list[dict], api_url: str) -> tuple[int, int]:
+def send_to_api(measurements: list[dict], api_url: str, api_key: str = "") -> tuple[int, int]:
     """Her ölçümü POST eder ve başarılı/hatalı kayıt sayılarını döndürür."""
     total = len(measurements)
     if total == 0:
         return 0, 0
+
+    key = api_key or load_config().get("api_key", "yerel-gelistirme-anahtari")
 
     # Sunucunun çalışıp çalışmadığını başlangıçta kontrol et
     base_url = api_url.rsplit("/", 1)[0]
@@ -264,11 +266,15 @@ def send_to_api(measurements: list[dict], api_url: str) -> tuple[int, int]:
 
     print(f"[*] API'ye aktarılıyor: {api_url} ({total} adet ölçüm)...")
     success = 0
+    headers = {
+        "Content-Type": "application/json",
+        "X-API-Key": key,
+    }
     for index, item in enumerate(measurements, start=1):
         request = urllib.request.Request(
             api_url,
             data=json.dumps(item).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:

@@ -14,3 +14,8 @@ latency_target = "1.1.1.1:443"
 # Hız testleri için ücretsiz test uç noktaları
 download_url = "https://speed.cloudflare.com/__down?bytes=5000000"
 upload_url = "https://speed.cloudflare.com/__up"
+
+# Bu listeleri yalnızca kendi bilgisayarındaki client_config.toml dosyasına ekle.
+# Repoya gerçek SSID veya BSSID yazma. Eşleşme yoksa ölçüm doğrulanmamış sayılır.
+campus_ssids = []
+campus_bssids = []

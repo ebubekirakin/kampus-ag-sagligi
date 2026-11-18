@@ -40,3 +40,24 @@ python data/generate_simulated.py --days 14 --seed 42 --mode api
 ```
 
 `--mode csv` seçeneği ölçümleri `data/simulated.csv` dosyasına yazar. Her çalıştırmada senaryo cevap anahtarı `data/ground_truth.json` dosyasına kaydedilir. Kayıtları `http://127.0.0.1:8000/measurements?is_simulated=1` adresinden kontrol edebilirsin.
+
+## Windows ölçüm istemcisi
+
+Örnek istemci ayarını yerel dosyaya kopyala ve aç:
+
+```powershell
+Copy-Item client/client_config.example.toml client/client_config.toml
+notepad client/client_config.toml
+```
+
+Sunucudaki `config.toml` ile istemci ayarındaki `api_key` aynı olmalı. Kampüs Wi-Fi adını ve erişim noktalarının BSSID değerlerini yalnızca yerel `client_config.toml` dosyasına ekle; ikisi de eşleşmedikçe istemci ölçümü doğrulanmış saymaz. Bir PowerShell penceresinde sunucuyu, ikinci pencerede istemciyi başlat:
+
+```powershell
+# Birinci pencere
+uvicorn backend.main:app --reload
+
+# İkinci pencere
+python -m client.main --repeat 1
+```
+
+İstemci tekrarlarını `--repeat 5 --interval 60` ile ayarlayabilirsin. Gerçek ölçümleri `http://127.0.0.1:8000/measurements?is_simulated=0` adresinden görüntüle.

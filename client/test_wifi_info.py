@@ -5,7 +5,11 @@ ve bağlantı kesikliği durumlarını test eder.
 """
 
 import unittest
-from client.wifi_info import parse_netsh_output
+from contextlib import redirect_stdout
+from io import StringIO
+from types import SimpleNamespace
+from unittest.mock import patch
+from client.wifi_info import get_wifi_info, parse_netsh_output
 
 
 ENGLISH_NETSH_SAMPLE = """
@@ -127,6 +131,23 @@ class TestWifiInfo(unittest.TestCase):
         res_empty = parse_netsh_output("There is no wireless interface on the system.")
         self.assertFalse(res_empty["connected"])
         self.assertIsNone(res_empty["ssid"])
+
+    def test_explicit_disconnected_state_wins_over_ssid(self):
+        sample = "State: disconnected\nSSID: OldNetwork\nBSSID: 00:11:22:33:44:55\nSignal: 80%"
+        result = parse_netsh_output(sample)
+        self.assertFalse(result["connected"])
+        self.assertIsNone(result["ssid"])
+        self.assertIsNone(result["bssid"])
+        self.assertIsNone(result["signal_pct"])
+
+    def test_wifi_unavailable_warning_is_not_debug_only(self):
+        process = SimpleNamespace(stdout=b"", stderr=b"", returncode=1)
+        output = StringIO()
+        with patch("client.wifi_info.subprocess.run", return_value=process):
+            with redirect_stdout(output):
+                result = get_wifi_info(debug=False)
+        self.assertFalse(result["connected"])
+        self.assertIn("Konum", output.getvalue())
 
 
 if __name__ == "__main__":
