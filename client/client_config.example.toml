@@ -15,6 +15,14 @@ latency_target = "1.1.1.1:443"
 download_url = "https://speed.cloudflare.com/__down?bytes=5000000"
 upload_url = "https://speed.cloudflare.com/__up"
 
+# Sunucuya ulaşılamadığında gösterilecek bölge listesi.
+zones = [
+  "Kütüphane 1. kat Okuma salonu",
+  "Mühendislik B Blok 2. kat Derslik koridoru",
+  "Yemekhane Zemin Kat",
+  "Öğrenci İşleri Giriş Kat",
+]
+
 # Bu listeleri yalnızca kendi bilgisayarındaki client_config.toml dosyasına ekle.
 # Repoya gerçek SSID veya BSSID yazma. Eşleşme yoksa ölçüm doğrulanmamış sayılır.
 campus_ssids = []

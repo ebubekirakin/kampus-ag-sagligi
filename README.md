@@ -52,6 +52,8 @@ notepad client/client_config.toml
 
 Sunucudaki `config.toml` ile istemci ayarındaki `api_key` aynı olmalı. Kampüs Wi-Fi adını ve erişim noktalarının BSSID değerlerini yalnızca yerel `client_config.toml` dosyasına ekle; ikisi de eşleşmedikçe istemci ölçümü doğrulanmış saymaz. Bir PowerShell penceresinde sunucuyu, ikinci pencerede istemciyi başlat:
 
+Sunucuya ulaşılamazsa istemci, `client_config.example.toml` içindeki `zones` listesini kullanır; kendi yerel ayarındaki `zones` listesi bu örnek listeyi değiştirebilir.
+
 ```powershell
 # Birinci pencere
 uvicorn backend.main:app --reload

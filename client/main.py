@@ -28,13 +28,20 @@ CLIENT_DIR = Path(__file__).resolve().parent
 @lru_cache(maxsize=1)
 def load_client_config() -> dict:
     """İstemci ayarlarını bir kez okur; eksik veya bozuksa anlaşılır hata verir."""
-    config_file = CLIENT_DIR / "client_config.toml"
-    if not config_file.exists():
-        config_file = CLIENT_DIR / "client_config.example.toml"
+    local_file = CLIENT_DIR / "client_config.toml"
+    example_file = CLIENT_DIR / "client_config.example.toml"
 
     try:
-        with open(config_file, "rb") as file:
-            return tomllib.load(file)
+        config = {}
+        if example_file.exists():
+            with open(example_file, "rb") as file:
+                config.update(tomllib.load(file))
+        if local_file.exists():
+            with open(local_file, "rb") as file:
+                config.update(tomllib.load(file))
+        if not config:
+            raise FileNotFoundError(example_file)
+        return config
     except FileNotFoundError as error:
         raise RuntimeError(
             "İstemci ayarı bulunamadı. client_config.example.toml dosyasını "
@@ -42,10 +49,10 @@ def load_client_config() -> dict:
         ) from error
     except tomllib.TOMLDecodeError as error:
         raise RuntimeError(
-            f"{config_file.name} okunamadı. TOML yazımını kontrol edin: {error}"
+            f"İstemci ayarı okunamadı. TOML yazımını kontrol edin: {error}"
         ) from error
     except OSError as error:
-        raise RuntimeError(f"{config_file.name} açılamadı: {error}") from error
+        raise RuntimeError(f"İstemci ayarı açılamadı: {error}") from error
 
 
 def get_or_create_device_id() -> str:
@@ -64,7 +71,7 @@ def get_or_create_device_id() -> str:
     return new_id
 
 
-def select_zone(server_url: str) -> str:
+def select_zone(server_url: str, fallback_zones: list[str]) -> str:
     """
     Kullanıcıya bölgeleri numaralı liste olarak sunar ve seçim yaptırır.
     Son seçimi 'last_zone.txt' dosyasına kaydeder.
@@ -74,18 +81,22 @@ def select_zone(server_url: str) -> str:
     try:
         resp = httpx.get(f"{server_url}/zones", timeout=3.0)
         if resp.status_code == 200:
-            zones = resp.json()
+            server_zones = resp.json()
+            if isinstance(server_zones, list) and all(
+                isinstance(zone, str) and zone.strip() for zone in server_zones
+            ):
+                zones = server_zones
     except Exception:
         pass
 
-    # Sunucuya ulaşılamazsa veya liste boşsa varsayılan bölgeleri kullan
+    # Sunucu kapalıysa yerel ayar dosyasındaki bölgeler kullanılır.
     if not zones:
-        zones = [
-            "Kütüphane 1. kat Okuma salonu",
-            "Mühendislik B Blok 2. kat Derslik koridoru",
-            "Yemekhane Zemin Kat",
-            "Öğrenci İşleri Giriş Kat",
-        ]
+        zones = [zone for zone in fallback_zones if isinstance(zone, str) and zone.strip()]
+    if not zones:
+        raise RuntimeError(
+            "Bölge listesi alınamadı. Sunucuyu açın veya client_config.toml içindeki "
+            "zones listesine bölgeleri ekleyin."
+        )
 
     last_zone_file = CLIENT_DIR / "last_zone.txt"
     last_zone = None
@@ -295,7 +306,10 @@ def main():
     device_hash = hashlib.sha256(raw_device_id.encode()).hexdigest()
 
     # Kullanıcıdan bölge seçimi al
-    selected_zone = select_zone(server_url)
+    try:
+        selected_zone = select_zone(server_url, config.get("zones", []))
+    except RuntimeError as error:
+        parser.error(str(error))
 
     # Varsa önce çevrimdışı kuyruktaki bekleyenleri gönder
     send_pending_measurements(server_url, api_key, debug=args.debug)

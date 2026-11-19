@@ -53,9 +53,28 @@ class TestClientState(unittest.TestCase):
             with patch.object(client_main, "CLIENT_DIR", Path(directory)):
                 with patch("client.main.httpx.get", return_value=response):
                     with patch("builtins.input", return_value="2"):
-                        self.assertEqual(client_main.select_zone("http://localhost"), "Mühendislik")
+                        self.assertEqual(
+                            client_main.select_zone("http://localhost", []), "Mühendislik"
+                        )
                     with patch("builtins.input", return_value=""):
-                        self.assertEqual(client_main.select_zone("http://localhost"), "Mühendislik")
+                        self.assertEqual(
+                            client_main.select_zone("http://localhost", []), "Mühendislik"
+                        )
+
+    def test_zone_fallback_comes_from_config(self):
+        zones = ["Yemekhane", "Kütüphane"]
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(client_main, "CLIENT_DIR", Path(directory)):
+                with patch("client.main.httpx.get", side_effect=OSError("server offline")):
+                    with patch("builtins.input", return_value="1"):
+                        self.assertEqual(
+                            client_main.select_zone("http://localhost", zones), "Yemekhane"
+                        )
+
+    def test_missing_server_and_fallback_zones_has_clear_error(self):
+        with patch("client.main.httpx.get", side_effect=OSError("server offline")):
+            with self.assertRaisesRegex(RuntimeError, "client_config.toml"):
+                client_main.select_zone("http://localhost", [])
 
 
 if __name__ == "__main__":
