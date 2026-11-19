@@ -4,8 +4,8 @@ NetNabız FastAPI Ana Sunucu Modülü.
 """
 
 from datetime import datetime, timezone
-from typing import List, Optional
 from secrets import compare_digest
+from typing import Optional
 from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -44,6 +44,15 @@ class MeasurementCreate(BaseModel):
     timestamp: Optional[str] = Field(default=None, description="Ölçüm zamanı (ISO 8601 formatı)")
 
 
+def check_api_key(supplied_key: Optional[str]) -> None:
+    """Ölçüm verisine erişmeden önce ortak anahtarı doğrular."""
+    expected_key = load_config().get("api_key", "")
+    supplied_bytes = supplied_key.encode("utf-8") if supplied_key else b""
+    expected_bytes = expected_key.encode("utf-8") if expected_key else b""
+    if not expected_bytes or not supplied_bytes or not compare_digest(supplied_bytes, expected_bytes):
+        raise HTTPException(status_code=401, detail="Geçersiz veya eksik API anahtarı.")
+
+
 @app.on_event("startup")
 def startup_event():
     """Uygulama başladığında veritabanı tablosunu hazırla."""
@@ -69,12 +78,7 @@ def create_measurement(
     x_api_key: Optional[str] = Header(default=None),
 ):
     """Yeni bir ölçüm kaydeder."""
-    # Paylaşılan anahtar yerel ayarlardan okunur ve sabit zamanlı karşılaştırılır.
-    expected_key = load_config().get("api_key", "")
-    supplied_key = x_api_key.encode("utf-8") if x_api_key else b""
-    expected_bytes = expected_key.encode("utf-8") if expected_key else b""
-    if not expected_bytes or not supplied_key or not compare_digest(supplied_key, expected_bytes):
-        raise HTTPException(status_code=401, detail="Geçersiz veya eksik API anahtarı.")
+    check_api_key(x_api_key)
 
     # Timestamp belirtilmemişse şu anki UTC zamanını kullan
     ts = measurement.timestamp or datetime.now(timezone.utc).isoformat()
@@ -111,7 +115,6 @@ def create_measurement(
                     ts,
                 ),
             )
-            conn.commit()
             record_id = cursor.lastrowid
             return {"status": "created", "id": record_id}
     except Exception as e:
@@ -124,8 +127,10 @@ def list_measurements(
     offset: int = Query(default=0, ge=0),
     is_simulated: Optional[int] = Query(default=None, description="0: Gerçek, 1: Simüle"),
     zone: Optional[str] = Query(default=None, description="Bölge filtresi"),
+    x_api_key: Optional[str] = Header(default=None),
 ):
-    """Kayıtlı ölçümleri listeler."""
+    """Paylaşılan anahtarla yetkilendirilmiş isteklere ölçümleri döner."""
+    check_api_key(x_api_key)
     query = "SELECT * FROM measurements WHERE 1=1"
     params = []
 

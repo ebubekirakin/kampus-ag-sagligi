@@ -171,7 +171,12 @@ class TestBackendEndpoints(unittest.TestCase):
                         "/measurements", json=payload, headers={"X-API-Key": api_key}
                     )
                     self.assertEqual(response.status_code, 201)
-                    rows = client.get("/measurements?is_simulated=0").json()
+                    unauthorized_get = client.get("/measurements?is_simulated=0")
+                    self.assertEqual(unauthorized_get.status_code, 401)
+                    rows = client.get(
+                        "/measurements?is_simulated=0",
+                        headers={"X-API-Key": api_key},
+                    ).json()
                     self.assertEqual(len(rows), 1)
                     self.assertEqual(rows[0]["is_simulated"], 0)
                     self.assertIsNone(rows[0]["rtt_ms"])

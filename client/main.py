@@ -7,6 +7,7 @@ Sunucu kapalıysa ölçümleri 'pending.jsonl' dosyasına biriktirir.
 
 import argparse
 from datetime import datetime, timezone
+from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
@@ -18,19 +19,33 @@ import httpx
 
 from client.network_tests import run_network_tests
 from client.wifi_info import get_wifi_info
+from project_utils import parse_building_floor
 
 # İstemci klasör yolu
 CLIENT_DIR = Path(__file__).resolve().parent
 
 
+@lru_cache(maxsize=1)
 def load_client_config() -> dict:
-    """İstemci yapılandırma dosyasını yükler."""
+    """İstemci ayarlarını bir kez okur; eksik veya bozuksa anlaşılır hata verir."""
     config_file = CLIENT_DIR / "client_config.toml"
     if not config_file.exists():
         config_file = CLIENT_DIR / "client_config.example.toml"
 
-    with open(config_file, "rb") as f:
-        return tomllib.load(f)
+    try:
+        with open(config_file, "rb") as file:
+            return tomllib.load(file)
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            "İstemci ayarı bulunamadı. client_config.example.toml dosyasını "
+            "client_config.toml adıyla kopyalayın."
+        ) from error
+    except tomllib.TOMLDecodeError as error:
+        raise RuntimeError(
+            f"{config_file.name} okunamadı. TOML yazımını kontrol edin: {error}"
+        ) from error
+    except OSError as error:
+        raise RuntimeError(f"{config_file.name} açılamadı: {error}") from error
 
 
 def get_or_create_device_id() -> str:
@@ -131,18 +146,6 @@ def classify_campus(wifi: dict, config: dict) -> tuple[float, int]:
     if ssid_matches or bssid_matches:
         return 0.6, 0
     return 0.25, 0
-
-
-def parse_building_floor(zone_name: str) -> tuple[str, str]:
-    """Bölge isminden bina ve kat ayrıştırması yapar."""
-    parts = zone_name.split()
-    building = parts[0] if parts else "Kampüs"
-    floor = "Zemin Kat"
-    for marker in ("1.", "2.", "3.", "4.", "Zemin", "Giriş"):
-        if marker.lower() in zone_name.lower():
-            floor = f"{marker} Kat"
-            break
-    return building, floor
 
 
 def send_pending_measurements(server_url: str, api_key: str, debug: bool = False):
@@ -280,7 +283,10 @@ def main():
     if args.interval < 0:
         parser.error("--interval negatif olamaz.")
 
-    config = load_client_config()
+    try:
+        config = load_client_config()
+    except RuntimeError as error:
+        parser.error(str(error))
     server_url = config.get("server_url", "http://127.0.0.1:8000")
     api_key = config.get("api_key", "yerel-gelistirme-anahtari")
 

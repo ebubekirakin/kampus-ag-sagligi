@@ -9,6 +9,13 @@ from typing import Optional
 import httpx
 
 
+def calculate_speed_mbps(data_bytes: int, elapsed_seconds: float) -> Optional[float]:
+    """Aktarılan bayt ve süreyi Mbps değerine çevirir."""
+    if data_bytes <= 0 or elapsed_seconds <= 0:
+        return None
+    return round(data_bytes * 8 / elapsed_seconds / 1_000_000, 2)
+
+
 def measure_tcp_latency_and_loss(
     target: str,
     attempts: int = 10,
@@ -80,9 +87,7 @@ async def _download_until_deadline(download_url: str, max_duration: float) -> Op
             total_bytes += len(chunk)
 
         elapsed = time.perf_counter() - started
-        if total_bytes == 0 or elapsed <= 0:
-            return None
-        return round(total_bytes * 8 / elapsed / 1_000_000, 2)
+        return calculate_speed_mbps(total_bytes, elapsed)
     finally:
         if response is not None:
             await response.aclose()
@@ -95,6 +100,8 @@ def measure_download_speed(
     debug: bool = False,
 ) -> Optional[float]:
     """Akış halinde indirir; istenen toplam süre aşılırsa o ana kadarki hızı döndürür."""
+    if not download_url or max_duration <= 0:
+        return None
     try:
         speed = asyncio.run(_download_until_deadline(download_url, max_duration))
         if debug:
@@ -119,9 +126,9 @@ async def _upload_with_deadline(
             client.post(upload_url, content=payload), timeout=max_duration
         )
     elapsed = time.perf_counter() - started
-    if response.status_code not in (200, 201, 204) or elapsed <= 0:
+    if response.status_code not in (200, 201, 204):
         return None
-    return round(len(payload) * 8 / elapsed / 1_000_000, 2)
+    return calculate_speed_mbps(len(payload), elapsed)
 
 
 def measure_upload_speed(
@@ -132,7 +139,7 @@ def measure_upload_speed(
 ) -> Optional[float]:
     """Yaklaşık 2 MB veri yollar; istek toplam süre sınırını aşarsa None döner."""
     try:
-        if payload_size_mb <= 0:
+        if not upload_url or payload_size_mb <= 0 or max_duration <= 0:
             return None
         payload = b"0" * int(payload_size_mb * 1024 * 1024)
         speed = asyncio.run(_upload_with_deadline(upload_url, payload, max_duration))

@@ -39,7 +39,7 @@ Ardından 14 günlük örnek veriyi üretmek için:
 python data/generate_simulated.py --days 14 --seed 42 --mode api
 ```
 
-`--mode csv` seçeneği ölçümleri `data/simulated.csv` dosyasına yazar. Her çalıştırmada senaryo cevap anahtarı `data/ground_truth.json` dosyasına kaydedilir. Kayıtları `http://127.0.0.1:8000/measurements?is_simulated=1` adresinden kontrol edebilirsin.
+`--mode csv` seçeneği ölçümleri `data/simulated.csv` dosyasına yazar. Her çalıştırmada senaryo cevap anahtarı `data/ground_truth.json` dosyasına kaydedilir. Ölçüm listesi korumalıdır; `/docs` sayfasında `GET /measurements` isteğine `X-API-Key` başlığını ekleyerek görüntüleyebilirsin.
 
 ## Windows ölçüm istemcisi
 
@@ -60,4 +60,4 @@ uvicorn backend.main:app --reload
 python -m client.main --repeat 1
 ```
 
-İstemci tekrarlarını `--repeat 5 --interval 60` ile ayarlayabilirsin. Gerçek ölçümleri `http://127.0.0.1:8000/measurements?is_simulated=0` adresinden görüntüle.
+İstemci tekrarlarını `--repeat 5 --interval 60` ile ayarlayabilirsin. Gerçek ölçümleri `/docs` içindeki `GET /measurements` isteğinde `is_simulated=0` filtresi ve `X-API-Key` başlığıyla görüntüle. `GET /zones` bölge isimleri içerdiğinden anahtarsız kalır.

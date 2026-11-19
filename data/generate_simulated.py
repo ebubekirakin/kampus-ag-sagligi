@@ -16,6 +16,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from backend.config import load_config
+from project_utils import parse_building_floor
 
 # Sabit başlangıç tarihi sayesinde aynı seed aynı zaman damgalarını üretir.
 SIMULATION_START_ANCHOR = datetime(2026, 11, 2, 8, 0, tzinfo=timezone.utc)
@@ -73,16 +74,43 @@ def get_ground_truth_scenarios(zones: list[str], faulty_bssid: str) -> list[dict
     ]
 
 
-def parse_building_floor(zone_name: str) -> tuple[str, str]:
-    """Bölge adından bina ve kat için basit, okunabilir etiketler çıkarır."""
-    parts = zone_name.split()
-    building = parts[0] if parts else "Kampüs"
-    floor = "Bilinmiyor"
-    for marker in ("1.", "2.", "3.", "4.", "Zemin", "Giriş"):
-        if marker.lower() in zone_name.lower():
-            floor = f"{marker} Kat"
-            break
-    return building, floor
+def apply_scenario_overrides(
+    rng: random.Random,
+    zone: str,
+    bssid: str,
+    day_index: int,
+    hour: int,
+    is_weekend: bool,
+    scenarios: list[dict],
+    faulty_zone: str,
+    faulty_bssid: str,
+    values: dict[str, float],
+) -> dict[str, float]:
+    """Tek ölçümdeki arıza senaryolarının değerlerini belirler."""
+    if zone == scenarios[0]["zone"] and not is_weekend and 16 <= hour < 19:
+        # Tıkanıklık: sinyal iyi kalırken gecikme yükselir.
+        values.update(rtt=rng.uniform(160, 310), rssi=rng.uniform(-55, -48))
+    elif zone == scenarios[1]["zone"]:
+        # Kapsama sorunu: sinyal ve hız her zaman düşük kalır.
+        values.update(
+            rssi=rng.uniform(-85, -78),
+            down=rng.uniform(1.8, 4.8),
+            up=rng.uniform(0.8, 2.5),
+            rtt=rng.uniform(45, 75),
+        )
+
+    if zone == faulty_zone and bssid == faulty_bssid:
+        values["loss"] = rng.uniform(12, 26)
+
+    if zone == scenarios[3]["zone"] and day_index == 6 and hour == 14:
+        values.update(
+            rtt=rng.uniform(520, 780),
+            loss=rng.uniform(50, 85),
+            down=rng.uniform(0.2, 0.9),
+            up=rng.uniform(0.1, 0.4),
+        )
+
+    return values
 
 
 def generate_measurements(days: int = 14, seed: int = 42) -> tuple[list[dict], list[dict]]:
@@ -154,26 +182,27 @@ def generate_measurements(days: int = 14, seed: int = 42) -> tuple[list[dict], l
                 if not weekend and busy_hour:
                     rtt += rng.uniform(5, 15)
 
-                if zone == ground_truth[0]["zone"] and not weekend and 16 <= hour < 19:
-                    # İyi sinyale rağmen yoğunluk gecikmeyi yükseltir.
-                    rtt = rng.uniform(160, 310)
-                    rssi = rng.uniform(-55, -48)
-                elif zone == ground_truth[1]["zone"]:
-                    rssi = rng.uniform(-85, -78)
-                    down_mbps = rng.uniform(1.8, 4.8)
-                    up_mbps = rng.uniform(0.8, 2.5)
-                    rtt = rng.uniform(45, 75)
-
-                if zone == faulty_zone and bssid == faulty_bssid:
-                    loss_pct = rng.uniform(12, 26)
-
-                # 7. gün oluşacak çöküş ayrıca garanti edilir; aşağıdaki koşul
-                # o saatte rastgele seçilen normal kayıtları da kesinti yapar.
-                if zone == ground_truth[3]["zone"] and day_index == 6 and hour == 14:
-                    rtt = rng.uniform(520, 780)
-                    loss_pct = rng.uniform(50, 85)
-                    down_mbps = rng.uniform(0.2, 0.9)
-                    up_mbps = rng.uniform(0.1, 0.4)
+                values = apply_scenario_overrides(
+                    rng=rng,
+                    zone=zone,
+                    bssid=bssid,
+                    day_index=day_index,
+                    hour=hour,
+                    is_weekend=weekend,
+                    scenarios=ground_truth,
+                    faulty_zone=faulty_zone,
+                    faulty_bssid=faulty_bssid,
+                    values={
+                        "rtt": rtt,
+                        "loss": loss_pct,
+                        "down": down_mbps,
+                        "up": up_mbps,
+                        "rssi": rssi,
+                    },
+                )
+                rtt, loss_pct = values["rtt"], values["loss"]
+                down_mbps, up_mbps = values["down"], values["up"]
+                rssi = values["rssi"]
 
                 if rng.random() < 0.015:
                     rtt += rng.uniform(200, 400)
