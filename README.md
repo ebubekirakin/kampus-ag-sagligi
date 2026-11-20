@@ -52,7 +52,7 @@ Copy-Item client/client_config.example.toml client/client_config.toml
 notepad client/client_config.toml
 ```
 
-Sunucudaki `config.toml` ile istemci ayarındaki `api_key` aynı olmalı. Kampüs Wi-Fi adını ve erişim noktalarının BSSID değerlerini yalnızca yerel `client_config.toml` dosyasına ekle; ikisi de eşleşmedikçe istemci ölçümü doğrulanmış saymaz. Bir PowerShell penceresinde sunucuyu, ikinci pencerede istemciyi başlat:
+Sunucudaki `config.toml` ile istemci ayarındaki `api_key` aynı olmalı. Gerçek ölçümlerde (`is_simulated=0`) sunucu, istemcinin gönderdiği güven skorunu yok sayar ve bağlantı IP'sini `campus_ip_ranges` ayarıyla karşılaştırır; `dev_mode=true` iken yerel `127.0.0.1` ve `::1` adresleri kampüs kabul edilir. Örnek IP listesi boş olduğu için yerel olmayan adresler liste yapılandırılana kadar doğrulanmaz. `X-Forwarded-For` başlığı kullanılmaz. Simüle ölçümlerde (`is_simulated=1`) senaryoları temsil edebilmek için istemcinin gönderdiği `campus_confidence` ve `is_verified` değerleri korunur. İstek IP'si veritabanına yazılmaz; erişim logu kapalı başlatma komutu IP'nin terminal loglarına düşmesini önler. Bir PowerShell penceresinde sunucuyu, ikinci pencerede istemciyi başlat:
 
 Sunucuya ulaşılamazsa istemci, `client_config.example.toml` içindeki `zones` listesini kullanır; kendi yerel ayarındaki `zones` listesi bu örnek listeyi değiştirebilir.
 

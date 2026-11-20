@@ -1,173 +1,199 @@
-"""
-Sunucu tarafı güvenlik, doğrulama, hash_salt ve IP tabanlı güven skoru testleri.
-"""
+"""Sunucu tarafı gizlilik ve doğrulama kurallarını test eder."""
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
-from fastapi.testclient import TestClient
+
+from fastapi import HTTPException
+from pydantic import ValidationError
 
 from backend import database
 from backend.config import load_config
-from backend.main import app, hash_device_id, calculate_campus_confidence
+from backend.main import (
+    MeasurementCreate,
+    calculate_campus_confidence,
+    create_measurement,
+    hash_device_id,
+)
 
 
 class TestServerSecurity(unittest.TestCase):
     def setUp(self):
         self.config = load_config()
         self.api_key = self.config["api_key"]
-        self.valid_zone = self.config.get("zones", ["Kütüphane 1. kat Okuma salonu"])[0]
+        self.valid_zone = self.config["zones"][0]
 
-    def test_salt_hashes_device_differently_from_input(self):
-        """Saklanan değerin gönderilen device_hash'ten farklı olduğunu doğrular (salt çalışıyor)."""
-        raw_device_hash = "f4c28a528e46b9a8"
-        salt = self.config.get("hash_salt", "test-salt")
-        stored_hash = hash_device_id(raw_device_hash, salt)
-
-        self.assertNotEqual(stored_hash, raw_device_hash)
-        self.assertEqual(len(stored_hash), 64)  # SHA-256 çıktısı 64 hex karakterdir
-
-    def test_same_device_hash_yields_same_stored_hash(self):
-        """Aynı device_hash için her zaman aynı saklanan HMAC değerinin üretildiğini doğrular."""
-        raw_hash = "abc123456789"
-        salt = self.config.get("hash_salt", "test-salt")
-        hash_1 = hash_device_id(raw_hash, salt)
-        hash_2 = hash_device_id(raw_hash, salt)
-
-        self.assertEqual(hash_1, hash_2)
-
-    def test_real_measurement_ignores_client_verified_flag(self):
-        """
-        is_simulated=0 iken istemcinin sahte is_verified=1 ve campus_confidence=1.0 göndermesi
-        durumunda sunucunun bunu yok sayıp istek IP'sine göre yeniden hesapladığını doğrular.
-        """
+    @contextmanager
+    def temporary_database(self, config=None):
+        """Her test için geçici veritabanı ve yapılandırma kullanır."""
         with tempfile.TemporaryDirectory() as directory:
-            db_path = Path(directory) / "sec.db"
+            db_path = Path(directory) / "test.db"
+            selected_config = config or self.config
             with patch.object(database, "get_db_path", return_value=db_path):
-                database.init_db()
-                with TestClient(app) as client:
-                    # İstemci hileli olarak kendini doğrulanmış (is_verified=1, confidence=1.0) gönderiyor
-                    payload = {
-                        "device_hash": "untrusted_device_1",
-                        "source": "desktop",
-                        "zone": self.valid_zone,
-                        "campus_confidence": 1.0,
-                        "is_verified": 1,
-                        "is_simulated": 0,
-                    }
-                    # TestClient varsayılan olarak testclient IP'siyle gelir (dev_mode=true iken 1.0 sayılır).
-                    # dev_mode=false ve kampüs dışı bir IP taklit edelim:
-                    with patch.dict(self.config, {"dev_mode": False, "campus_ip_ranges": ["10.0.0.0/8"]}):
-                        # calculate_campus_confidence testclient için dev_mode=false iken 0.0 dönecektir
-                        resp = client.post(
-                            "/measurements",
-                            json=payload,
-                            headers={"X-API-Key": self.api_key},
-                        )
-                        self.assertEqual(resp.status_code, 201)
+                with patch("backend.main.load_config", return_value=selected_config):
+                    database.init_db()
+                    yield
 
-                        data = client.get(
-                            "/measurements?is_simulated=0",
-                            headers={"X-API-Key": self.api_key},
-                        ).json()
-                        self.assertEqual(len(data), 1)
-                        # Sunucu istemcinin gönderdiği 1.0 ve 1 değerlerini YOK SAYMALI, 0 yapmalı:
-                        self.assertEqual(data[0]["campus_confidence"], 0.0)
-                        self.assertEqual(data[0]["is_verified"], 0)
+    def make_request(self, host="192.0.2.10", forwarded_for=None):
+        """Endpoint fonksiyonlarına küçük bir sahte istemci adresi verir."""
+        headers = {}
+        if forwarded_for:
+            headers["x-forwarded-for"] = forwarded_for
+        return SimpleNamespace(client=SimpleNamespace(host=host), headers=headers)
+
+    def make_measurement(self, **changes):
+        """Testlerde kullanılacak geçerli bir ölçüm modeli hazırlar."""
+        payload = {
+            "device_hash": "client-device-hash",
+            "source": "desktop",
+            "zone": self.valid_zone,
+            "is_simulated": 0,
+            "campus_confidence": 1.0,
+            "is_verified": 1,
+        }
+        payload.update(changes)
+        return MeasurementCreate(**payload)
+
+    def read_device_hashes(self):
+        """Geçici veritabanına yazılan cihaz hash'lerini döndürür."""
+        with database.get_connection() as connection:
+            rows = connection.execute(
+                "SELECT device_hash FROM measurements ORDER BY id"
+            ).fetchall()
+        return [row["device_hash"] for row in rows]
+
+    def test_salt_changes_value_stored_in_database(self):
+        """Sunucunun sakladığı HMAC, istemcinin gönderdiği değerden farklıdır."""
+        with self.temporary_database():
+            measurement = self.make_measurement(device_hash="known-client-hash")
+            create_measurement(measurement, self.make_request(), self.api_key)
+
+            stored_hash = self.read_device_hashes()[0]
+
+        expected_hash = hash_device_id(
+            "known-client-hash", self.config["hash_salt"]
+        )
+        self.assertEqual(stored_hash, expected_hash)
+        self.assertNotEqual(stored_hash, "known-client-hash")
+
+    def test_same_device_hash_has_same_stored_value(self):
+        """Aynı istemci hash'i iki kayıtta aynı sunucu hash'ini üretir."""
+        with self.temporary_database():
+            for _ in range(2):
+                create_measurement(
+                    self.make_measurement(device_hash="same-client-hash"),
+                    self.make_request(),
+                    self.api_key,
+                )
+            stored_hashes = self.read_device_hashes()
+
+        self.assertEqual(len(stored_hashes), 2)
+        self.assertEqual(stored_hashes[0], stored_hashes[1])
+
+    def test_real_measurement_recalculates_client_verification(self):
+        """Gerçek ölçümde sahte istemci skorları yerine istek IP'si kullanılır."""
+        config = dict(self.config)
+        config.update(dev_mode=False, campus_ip_ranges=["10.0.0.0/8"])
+        with self.temporary_database(config):
+            create_measurement(
+                self.make_measurement(is_simulated=0),
+                self.make_request(
+                    "192.0.2.10", forwarded_for="10.1.2.3"
+                ),
+                self.api_key,
+            )
+            with database.get_connection() as connection:
+                row = connection.execute(
+                    "SELECT campus_confidence, is_verified FROM measurements"
+                ).fetchone()
+
+        self.assertEqual(row["campus_confidence"], 0.0)
+        self.assertEqual(row["is_verified"], 0)
 
     def test_simulated_measurement_preserves_client_confidence(self):
-        """is_simulated=1 olduğunda gönderilen güven skorunun ve doğrulama durumunun korunduğunu doğrular."""
-        with tempfile.TemporaryDirectory() as directory:
-            db_path = Path(directory) / "sim.db"
-            with patch.object(database, "get_db_path", return_value=db_path):
-                database.init_db()
-                with TestClient(app) as client:
-                    payload = {
-                        "device_hash": "sim_device_1",
-                        "source": "desktop",
-                        "zone": self.valid_zone,
-                        "campus_confidence": 0.15,
-                        "is_verified": 0,
-                        "is_simulated": 1,
-                    }
-                    resp = client.post(
-                        "/measurements",
-                        json=payload,
-                        headers={"X-API-Key": self.api_key},
-                    )
-                    self.assertEqual(resp.status_code, 201)
+        """Simüle kayıtta gelen güven ve doğrulama değerleri korunur."""
+        with self.temporary_database():
+            create_measurement(
+                self.make_measurement(
+                    is_simulated=1, campus_confidence=0.15, is_verified=0
+                ),
+                self.make_request(),
+                self.api_key,
+            )
+            with database.get_connection() as connection:
+                row = connection.execute(
+                    "SELECT campus_confidence, is_verified FROM measurements"
+                ).fetchone()
 
-                    rows = client.get(
-                        "/measurements?is_simulated=1",
-                        headers={"X-API-Key": self.api_key},
-                    ).json()
-                    self.assertEqual(len(rows), 1)
-                    # Simülasyon skorları korunmalı:
-                    self.assertEqual(rows[0]["campus_confidence"], 0.15)
-                    self.assertEqual(rows[0]["is_verified"], 0)
+        self.assertEqual(row["campus_confidence"], 0.15)
+        self.assertEqual(row["is_verified"], 0)
 
-    def test_invalid_source_returns_422(self):
-        """source yalnızca desktop, web veya android olabilir; başka bir değerde 422 dönmeli."""
-        with tempfile.TemporaryDirectory() as directory:
-            db_path = Path(directory) / "val.db"
-            with patch.object(database, "get_db_path", return_value=db_path):
-                database.init_db()
-                with TestClient(app) as client:
-                    payload = {
-                        "device_hash": "dev_test",
-                        "source": "smart_tv",  # Geçersiz kaynak
-                        "zone": self.valid_zone,
-                    }
-                    resp = client.post(
-                        "/measurements",
-                        json=payload,
-                        headers={"X-API-Key": self.api_key},
-                    )
-                    self.assertEqual(resp.status_code, 422)
+    def test_campus_confidence_uses_only_configured_ip_rules(self):
+        """Kampüs IP aralığı ve geliştirme modundaki yerel adresler tanınır."""
+        config = {"dev_mode": False, "campus_ip_ranges": ["10.0.0.0/8"]}
+        self.assertEqual(calculate_campus_confidence("10.2.3.4", config), 1.0)
+        self.assertEqual(calculate_campus_confidence("192.0.2.1", config), 0.0)
+        config["dev_mode"] = True
+        self.assertEqual(calculate_campus_confidence("127.0.0.1", config), 1.0)
+        self.assertEqual(calculate_campus_confidence("::1", config), 1.0)
 
-    def test_invalid_and_future_timestamp_returns_422(self):
-        """Geçersiz format veya gelecekte 5 dakikadan fazla ileri tarihli zaman damgasında 422 dönmeli."""
-        with tempfile.TemporaryDirectory() as directory:
-            db_path = Path(directory) / "val.db"
-            with patch.object(database, "get_db_path", return_value=db_path):
-                database.init_db()
-                with TestClient(app) as client:
-                    # 1. Format hatası
-                    resp1 = client.post(
-                        "/measurements",
-                        json={"device_hash": "dev", "zone": self.valid_zone, "timestamp": "gecersiz-tarih"},
-                        headers={"X-API-Key": self.api_key},
-                    )
-                    self.assertEqual(resp1.status_code, 422)
+    def test_invalid_source_and_timestamp_are_rejected_by_request_model(self):
+        """Geçersiz kaynak ve ISO 8601 olmayan zaman damgası modelden geçmez."""
+        with self.assertRaises(ValidationError):
+            self.make_measurement(source="smart_tv")
+        with self.assertRaises(ValidationError):
+            self.make_measurement(timestamp="gecersiz-tarih")
 
-                    # 2. 10 dakika gelecekteki tarih
-                    far_future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
-                    resp2 = client.post(
-                        "/measurements",
-                        json={"device_hash": "dev", "zone": self.valid_zone, "timestamp": far_future},
-                        headers={"X-API-Key": self.api_key},
-                    )
-                    self.assertEqual(resp2.status_code, 422)
+    def test_timestamp_is_utc_and_far_future_is_rejected(self):
+        """Zaman UTC'ye çevrilir ve beş dakikadan fazla gelecek kabul edilmez."""
+        measurement = self.make_measurement(
+            timestamp="2026-11-20T15:00:00+03:00"
+        )
+        self.assertTrue(measurement.timestamp.endswith("+00:00"))
 
-    def test_invalid_zone_returns_422(self):
-        """Tanımlı olmayan bölge girildiğinde 422 dönmeli."""
-        with tempfile.TemporaryDirectory() as directory:
-            db_path = Path(directory) / "val.db"
-            with patch.object(database, "get_db_path", return_value=db_path):
-                database.init_db()
-                with TestClient(app) as client:
-                    payload = {
-                        "device_hash": "dev",
-                        "zone": "Uzay Üssü Koridoru",  # Tanımlı değil
-                    }
-                    resp = client.post(
-                        "/measurements",
-                        json=payload,
-                        headers={"X-API-Key": self.api_key},
-                    )
-                    self.assertEqual(resp.status_code, 422)
+        far_future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+        with self.assertRaises(ValidationError):
+            self.make_measurement(timestamp=far_future)
+
+    def test_unknown_or_unconfigured_zone_is_rejected(self):
+        """Tanımsız bölge ve boş bölge ayarları ölçüm kabul etmez."""
+        with self.temporary_database():
+            with self.assertRaises(HTTPException) as unknown_zone:
+                create_measurement(
+                    self.make_measurement(zone="Uzay Üssü Koridoru"),
+                    self.make_request(),
+                    self.api_key,
+                )
+            self.assertEqual(unknown_zone.exception.status_code, 422)
+
+        empty_config = dict(self.config)
+        empty_config["zones"] = []
+        with self.temporary_database(empty_config):
+            with self.assertRaises(HTTPException) as empty_zones:
+                create_measurement(
+                    self.make_measurement(), self.make_request(), self.api_key
+                )
+            self.assertEqual(empty_zones.exception.status_code, 422)
+
+    def test_empty_building_and_floor_are_filled_from_zone(self):
+        """Bina ve kat boş bırakılınca bölge adından tamamlanır."""
+        with self.temporary_database():
+            create_measurement(
+                self.make_measurement(building=None, floor=None),
+                self.make_request(),
+                self.api_key,
+            )
+            with database.get_connection() as connection:
+                row = connection.execute(
+                    "SELECT building, floor FROM measurements"
+                ).fetchone()
+
+        self.assertEqual(row["building"], "Kütüphane")
+        self.assertEqual(row["floor"], "1. Kat")
 
 
 if __name__ == "__main__":

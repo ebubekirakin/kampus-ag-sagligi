@@ -148,10 +148,14 @@ def create_measurement(
 
     # Bölge kontrolü (config'teki zones listesinde olmalı; yoksa 422)
     allowed_zones = config.get("zones", [])
-    if allowed_zones and measurement.zone not in allowed_zones:
+    if not allowed_zones or measurement.zone not in allowed_zones:
         raise HTTPException(
             status_code=422,
-            detail=f"Geçersiz bölge: '{measurement.zone}'. Tanımlı bölgelerden biri seçilmelidir.",
+            detail=(
+                "Ayar dosyasında geçerli bölge tanımlanmamış."
+                if not allowed_zones
+                else f"Geçersiz bölge: '{measurement.zone}'. Tanımlı bölgelerden biri seçilmelidir."
+            ),
         )
 
     # Building ve floor boşsa zone adından otomatik türet

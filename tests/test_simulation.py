@@ -146,42 +146,51 @@ class TestDatabaseMigration(unittest.TestCase):
 
 class TestBackendEndpoints(unittest.TestCase):
     def test_post_accepts_optional_simulated_flag(self):
-        try:
-            from fastapi.testclient import TestClient
-            from backend.main import app
-        except ImportError:
-            self.skipTest("FastAPI veya httpx kurulu değil.")
+        from types import SimpleNamespace
+        from fastapi import HTTPException
+        from backend.main import MeasurementCreate, create_measurement, list_measurements
 
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "api.db"
             with patch.object(database, "get_db_path", return_value=db_path):
                 database.init_db()
-                with TestClient(app) as client:
-                    valid_zone = load_config().get("zones", ["Kütüphane 1. kat Okuma salonu"])[0]
-                    payload = {
-                        "device_hash": "test-hash",
-                        "rtt_ms": None,
-                        "loss_pct": None,
-                        "down_mbps": None,
-                        "up_mbps": None,
-                        "zone": valid_zone,
-                    }
-                    unauthorized = client.post("/measurements", json=payload)
-                    self.assertEqual(unauthorized.status_code, 401)
-                    api_key = load_config()["api_key"]
-                    response = client.post(
-                        "/measurements", json=payload, headers={"X-API-Key": api_key}
-                    )
-                    self.assertEqual(response.status_code, 201)
-                    unauthorized_get = client.get("/measurements?is_simulated=0")
-                    self.assertEqual(unauthorized_get.status_code, 401)
-                    rows = client.get(
-                        "/measurements?is_simulated=0",
-                        headers={"X-API-Key": api_key},
-                    ).json()
-                    self.assertEqual(len(rows), 1)
-                    self.assertEqual(rows[0]["is_simulated"], 0)
-                    self.assertIsNone(rows[0]["rtt_ms"])
+                config = load_config()
+                valid_zone = config["zones"][0]
+                payload = MeasurementCreate(
+                    device_hash="test-hash",
+                    rtt_ms=None,
+                    loss_pct=None,
+                    down_mbps=None,
+                    up_mbps=None,
+                    zone=valid_zone,
+                )
+                request = SimpleNamespace(
+                    client=SimpleNamespace(host="127.0.0.1")
+                )
+
+                with self.assertRaises(HTTPException) as unauthorized:
+                    create_measurement(payload, request, None)
+                self.assertEqual(unauthorized.exception.status_code, 401)
+
+                response = create_measurement(
+                    payload, request, config["api_key"]
+                )
+                self.assertEqual(response["status"], "created")
+
+                with self.assertRaises(HTTPException) as unauthorized_get:
+                    list_measurements(x_api_key=None)
+                self.assertEqual(unauthorized_get.exception.status_code, 401)
+
+                rows = list_measurements(
+                    limit=100,
+                    offset=0,
+                    is_simulated=0,
+                    zone=None,
+                    x_api_key=config["api_key"],
+                )
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["is_simulated"], 0)
+                self.assertIsNone(rows[0]["rtt_ms"])
 
 
 if __name__ == "__main__":
