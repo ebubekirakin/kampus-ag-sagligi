@@ -11,3 +11,10 @@ client/device_id.txt
 client/last_zone.txt
 client/pending.jsonl
 
+# Analiz ve yedek dosyaları
+data/*.bak
+data/analysis_summary.json
+data/ap_alias_map.json
+data/evaluation_result.md
+
+

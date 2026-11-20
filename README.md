@@ -20,8 +20,10 @@ python -m pip install -r requirements.txt
 ## Sunucuyu çalıştırma
 
 ```powershell
-uvicorn backend.main:app --reload
+uvicorn backend.main:app --reload --no-access-log
 ```
+
+`--no-access-log` parametresi, HTTP isteklerini yapan kullanıcıların IP adreslerinin terminale veya log dosyalarına kaydedilmesini önleyerek kullanıcı gizliliğini korur.
 
 Tarayıcıda API belgelerini `http://127.0.0.1:8000/docs` adresinden, sağlık kontrolünü `http://127.0.0.1:8000/health` adresinden aç. Sağlık kontrolü `{"status":"ok"}` yanıtını verir.
 
@@ -56,7 +58,7 @@ Sunucuya ulaşılamazsa istemci, `client_config.example.toml` içindeki `zones` 
 
 ```powershell
 # Birinci pencere
-uvicorn backend.main:app --reload
+uvicorn backend.main:app --reload --no-access-log
 
 # İkinci pencere
 python -m client.main --repeat 1

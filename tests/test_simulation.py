@@ -155,14 +155,16 @@ class TestBackendEndpoints(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "api.db"
             with patch.object(database, "get_db_path", return_value=db_path):
+                database.init_db()
                 with TestClient(app) as client:
+                    valid_zone = load_config().get("zones", ["Kütüphane 1. kat Okuma salonu"])[0]
                     payload = {
                         "device_hash": "test-hash",
                         "rtt_ms": None,
                         "loss_pct": None,
                         "down_mbps": None,
                         "up_mbps": None,
-                        "zone": "Test bölgesi",
+                        "zone": valid_zone,
                     }
                     unauthorized = client.post("/measurements", json=payload)
                     self.assertEqual(unauthorized.status_code, 401)
