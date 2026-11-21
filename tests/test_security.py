@@ -23,7 +23,8 @@ from backend.main import (
 
 class TestServerSecurity(unittest.TestCase):
     def setUp(self):
-        self.config = load_config()
+        self.config = dict(load_config())
+        self.config["hash_salt"] = "unit-test-hmac-key"
         self.api_key = self.config["api_key"]
         self.valid_zone = self.config["zones"][0]
 
@@ -79,6 +80,19 @@ class TestServerSecurity(unittest.TestCase):
         )
         self.assertEqual(stored_hash, expected_hash)
         self.assertNotEqual(stored_hash, "known-client-hash")
+
+    def test_missing_salt_fails_closed(self):
+        """Boş tuzla cihaz kimliği kaydetmeye izin verilmez."""
+        config = dict(self.config)
+        for invalid_salt in ("  ", "BU_DEGERI_KENDI_CONFIG_DOSYANDA_DEGISTIR"):
+            with self.subTest(salt_type="empty" if not invalid_salt.strip() else "example"):
+                config["hash_salt"] = invalid_salt
+                with self.temporary_database(config):
+                    with self.assertRaises(HTTPException) as error:
+                        create_measurement(
+                            self.make_measurement(), self.make_request(), self.api_key
+                        )
+                self.assertEqual(error.exception.status_code, 500)
 
     def test_same_device_hash_has_same_stored_value(self):
         """Aynı istemci hash'i iki kayıtta aynı sunucu hash'ini üretir."""
@@ -140,6 +154,11 @@ class TestServerSecurity(unittest.TestCase):
         config["dev_mode"] = True
         self.assertEqual(calculate_campus_confidence("127.0.0.1", config), 1.0)
         self.assertEqual(calculate_campus_confidence("::1", config), 1.0)
+
+    def test_ipv6_ip_with_ipv4_cidr_does_not_crash(self):
+        """IPv4 CIDR ile IPv6 istemciyi karşılaştırmak hata üretmez."""
+        config = {"dev_mode": False, "campus_ip_ranges": ["10.0.0.0/8"]}
+        self.assertEqual(calculate_campus_confidence("2001:db8::1", config), 0.0)
 
     def test_invalid_source_and_timestamp_are_rejected_by_request_model(self):
         """Geçersiz kaynak ve ISO 8601 olmayan zaman damgası modelden geçmez."""

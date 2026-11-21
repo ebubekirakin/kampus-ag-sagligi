@@ -3,6 +3,7 @@ NetNabız FastAPI Ana Sunucu Modülü.
 Ölçümleri alır, doğrular ve SQLite veritabanına kaydeder.
 """
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -16,10 +17,18 @@ from backend.config import load_config
 from backend.database import get_connection, init_db
 from project_utils import parse_building_floor
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Sunucu açılırken veritabanını hazırlar."""
+    init_db()
+    yield
+
 app = FastAPI(
     title="NetNabız API",
     description="Kampüs Wi-Fi Sağlığı Ölçüm ve İzleme API",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 
@@ -75,6 +84,15 @@ class MeasurementCreate(BaseModel):
 
 def hash_device_id(device_hash: str, salt: str) -> str:
     """İstemciden gelen device_hash değerini sunucudaki hash_salt ile HMAC-SHA256 kullanarak yeniden hash'ler."""
+    example_salt = "BU_DEGERI_KENDI_CONFIG_DOSYANDA_DEGISTIR"
+    if (
+        not isinstance(salt, str)
+        or not salt.strip()
+        or salt.strip() == example_salt
+    ):
+        raise ValueError(
+            "hash_salt boş veya örnek değer olamaz; config.toml dosyasına özel bir değer yazın."
+        )
     return hmac.new(
         salt.encode("utf-8"), device_hash.encode("utf-8"), hashlib.sha256
     ).hexdigest()
@@ -102,7 +120,7 @@ def calculate_campus_confidence(client_ip: Optional[str], config: dict) -> float
         try:
             if ip in ip_network(cidr):
                 return 1.0
-        except ValueError:
+        except (TypeError, ValueError):
             continue
 
     return 0.0
@@ -115,12 +133,6 @@ def check_api_key(supplied_key: Optional[str]) -> None:
     expected_bytes = expected_key.encode("utf-8") if expected_key else b""
     if not expected_bytes or not supplied_bytes or not compare_digest(supplied_bytes, expected_bytes):
         raise HTTPException(status_code=401, detail="Geçersiz veya eksik API anahtarı.")
-
-
-@app.on_event("startup")
-def startup_event():
-    """Uygulama başladığında veritabanı tablosunu hazırla."""
-    init_db()
 
 
 @app.get("/health")
@@ -168,7 +180,10 @@ def create_measurement(
 
     # Cihaz hash'ini sunucu tarafındaki hash_salt ile HMAC-SHA256 yaparak sakla
     salt = config.get("hash_salt", "")
-    stored_device_hash = hash_device_id(measurement.device_hash, salt)
+    try:
+        stored_device_hash = hash_device_id(measurement.device_hash, salt)
+    except ValueError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
 
     # campus_confidence ve is_verified sunucuda hesaplanır
     if measurement.is_simulated == 0:

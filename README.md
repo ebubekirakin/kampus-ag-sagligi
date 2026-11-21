@@ -17,6 +17,15 @@ Gerekli paketleri kur:
 python -m pip install -r requirements.txt
 ```
 
+Sunucu ayarlarının yerel kopyasını oluştur ve gizli değerleri düzenle:
+
+```powershell
+Copy-Item config.example.toml config.toml
+notepad config.toml
+```
+
+`hash_salt` değerini kendine özel, tahmin edilemeyen bir değerle değiştir. `api_key` değerini de yerel istemci ayarındaki `api_key` ile aynı tut. `config.toml` Git'e eklenmez.
+
 ## Sunucuyu çalıştırma
 
 ```powershell

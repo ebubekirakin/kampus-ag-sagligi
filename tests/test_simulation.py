@@ -155,6 +155,8 @@ class TestBackendEndpoints(unittest.TestCase):
             with patch.object(database, "get_db_path", return_value=db_path):
                 database.init_db()
                 config = load_config()
+                config = dict(config)
+                config["hash_salt"] = "unit-test-hmac-key"
                 valid_zone = config["zones"][0]
                 payload = MeasurementCreate(
                     device_hash="test-hash",
@@ -168,26 +170,27 @@ class TestBackendEndpoints(unittest.TestCase):
                     client=SimpleNamespace(host="127.0.0.1")
                 )
 
-                with self.assertRaises(HTTPException) as unauthorized:
-                    create_measurement(payload, request, None)
-                self.assertEqual(unauthorized.exception.status_code, 401)
+                with patch("backend.main.load_config", return_value=config):
+                    with self.assertRaises(HTTPException) as unauthorized:
+                        create_measurement(payload, request, None)
+                    self.assertEqual(unauthorized.exception.status_code, 401)
 
-                response = create_measurement(
-                    payload, request, config["api_key"]
-                )
-                self.assertEqual(response["status"], "created")
+                    response = create_measurement(
+                        payload, request, config["api_key"]
+                    )
+                    self.assertEqual(response["status"], "created")
 
-                with self.assertRaises(HTTPException) as unauthorized_get:
-                    list_measurements(x_api_key=None)
-                self.assertEqual(unauthorized_get.exception.status_code, 401)
+                    with self.assertRaises(HTTPException) as unauthorized_get:
+                        list_measurements(x_api_key=None)
+                    self.assertEqual(unauthorized_get.exception.status_code, 401)
 
-                rows = list_measurements(
-                    limit=100,
-                    offset=0,
-                    is_simulated=0,
-                    zone=None,
-                    x_api_key=config["api_key"],
-                )
+                    rows = list_measurements(
+                        limit=100,
+                        offset=0,
+                        is_simulated=0,
+                        zone=None,
+                        x_api_key=config["api_key"],
+                    )
                 self.assertEqual(len(rows), 1)
                 self.assertEqual(rows[0]["is_simulated"], 0)
                 self.assertIsNone(rows[0]["rtt_ms"])

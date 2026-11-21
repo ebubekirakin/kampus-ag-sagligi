@@ -7,9 +7,11 @@ def parse_building_floor(zone_name: str) -> tuple[str, str]:
     building = parts[0] if parts else "Bilinmiyor"
     floor = "Bilinmiyor"
 
-    for marker in ("1.", "2.", "3.", "4.", "Zemin", "Giriş"):
-        if marker.lower() in zone_name.lower():
-            floor = f"{marker} Kat"
+    floor_markers = {"1.", "2.", "3.", "4.", "zemin", "giriş"}
+    for index, part in enumerate(parts):
+        if part.casefold() in floor_markers:
+            building = " ".join(parts[:index]) or "Bilinmiyor"
+            floor = f"{part} Kat"
             break
 
     return building, floor
