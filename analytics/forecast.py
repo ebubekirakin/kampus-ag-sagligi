@@ -10,6 +10,26 @@ import pandas as pd
 from backend.config import load_config
 
 
+def predict_seasonal_rtt(
+    df: pd.DataFrame, zone: str, is_weekend: bool, hour: int
+) -> float | None:
+    """İstenen bölge ve zaman için mevsimsel medyan tahmini üretir."""
+    if df.empty or "rtt_ms" not in df.columns:
+        return None
+
+    zone_df = df[(df["zone"] == zone) & df["rtt_ms"].notna()]
+    if zone_df.empty:
+        return None
+
+    seasonal = zone_df[
+        (zone_df["is_weekend"] == is_weekend) & (zone_df["hour"] == hour)
+    ]["rtt_ms"]
+    if not seasonal.empty:
+        return float(seasonal.median())
+
+    return float(zone_df["rtt_ms"].median())
+
+
 def evaluate_forecast(df: pd.DataFrame, config: dict | None = None) -> dict[str, Any]:
     """
     Verinin son N gününü test kümesi olarak ayırır (varsayılan: 3 gün).

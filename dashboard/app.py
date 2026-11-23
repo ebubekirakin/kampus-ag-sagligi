@@ -20,6 +20,7 @@ from dashboard.helpers import (
     find_underperforming_forecast_zones,
     build_hourly_day_matrix,
     prepare_masked_issues_and_anomalies,
+    get_record_counts,
 )
 
 # Sayfa Temel Ayarları
@@ -196,15 +197,15 @@ if view_mode == "Öğrenci":
 
         z_df = df[df["zone"] == selected_zone_student].copy()
         if not z_df.empty and "rtt_ms" in z_df.columns:
-            weekday_series = z_df[~z_df["is_weekend"]].groupby("hour")["rtt_ms"].median()
-            weekend_series = z_df[z_df["is_weekend"]].groupby("hour")["rtt_ms"].median()
+            weekday_series = z_df[~z_df["is_weekend"]].groupby("hour")["rtt_ms"].mean()
+            weekend_series = z_df[z_df["is_weekend"]].groupby("hour")["rtt_ms"].mean()
 
             chart_data = pd.DataFrame(index=[f"{h:02d}:00" for h in range(24)])
             chart_data["Hafta içi Gecikme (ms)"] = [weekday_series.get(h) for h in range(24)]
             chart_data["Hafta sonu Gecikme (ms)"] = [weekend_series.get(h) for h in range(24)]
 
             st.line_chart(chart_data)
-            st.caption(f"*{selected_zone_student}* için hafta içi ve hafta sonu saatlik medyan gecikme (ms).")
+            st.caption(f"*{selected_zone_student}* için hafta içi ve hafta sonu saatlik ortalama gecikme (ms).")
 
 
 # -------------------------------------------------------------
@@ -225,18 +226,21 @@ else:
     # 1. SEKME: GENEL BAKIŞ
     with tab_overview:
         st.subheader("Kampüs Ağ Sağlığı Özeti")
-        total_records = len(df)
-        verified_count = int(df["is_verified"].sum()) if "is_verified" in df.columns else 0
+        record_counts = get_record_counts(data_type)
+        total_records = record_counts["total"]
+        verified_count = record_counts["verified"]
+        unverified_count = record_counts["unverified"]
         verified_ratio = (verified_count / total_records * 100) if total_records > 0 else 0.0
+        unverified_ratio = (unverified_count / total_records * 100) if total_records > 0 else 0.0
+        sim_count = record_counts["simulated"]
+        real_count = record_counts["real"]
 
-        sim_count = int(df["is_simulated"].sum()) if "is_simulated" in df.columns else 0
-        real_count = total_records - sim_count
-
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Toplam Ölçüm", f"{total_records:,}")
-        c2.metric("Doğrulanmış Kayıt", f"%{verified_ratio:.1f}", f"{verified_count:,} adet")
-        c3.metric("Simüle / Gerçek", f"{sim_count:,} / {real_count:,}")
-        c4.metric("İzlenen Bölge", len(scores))
+        c2.metric("Doğrulanmış", f"%{verified_ratio:.1f}", f"{verified_count:,} adet")
+        c3.metric("Doğrulanmamış", f"%{unverified_ratio:.1f}", f"{unverified_count:,} adet")
+        c4.metric("Simüle / Gerçek", f"{sim_count:,} / {real_count:,}")
+        c5.metric("İzlenen Bölge", len(scores))
 
         st.markdown("### Bölge Sağlık Skorları Tablosu")
         table_rows = []
@@ -323,10 +327,22 @@ else:
                 daily_down = z_admin_df.groupby("day_str")["down_mbps"].median()
                 st.line_chart(daily_down)
 
+            col_t5, col_t6 = st.columns(2)
+            with col_t5:
+                st.markdown("**Saatlik Medyan Paket Kaybı (%)**")
+                hourly_loss = z_admin_df.groupby("hour")["loss_pct"].median()
+                st.line_chart(hourly_loss)
+
+            with col_t6:
+                st.markdown("**Saatlik Medyan İndirme Hızı (Mbps)**")
+                hourly_down = z_admin_df.groupby("hour")["down_mbps"].median()
+                st.line_chart(hourly_down)
+
             st.markdown("#### Saat × Hafta Günü Ortalama Gecikme Matrisi (ms)")
             matrix_df = build_hourly_day_matrix(df, selected_zone_admin)
-            st.dataframe(matrix_df, use_container_width=True)
-            st.caption(f"*{selected_zone_admin}* için gün ve saatlere göre medyan gecikme dağılımı.")
+            styled_matrix = matrix_df.style.background_gradient(cmap="YlOrRd", axis=None)
+            st.dataframe(styled_matrix, use_container_width=True)
+            st.caption(f"*{selected_zone_admin}* için gün ve saatlere göre ortalama gecikme dağılımı.")
 
     # 4. SEKME: TAHMİN
     with tab_forecast:
@@ -390,21 +406,22 @@ else:
 
         col_p1, col_p2 = st.columns(2)
         with col_p1:
-            st.markdown("#### ✅ Toplanan ve Saklanan Alanlar")
+            st.markdown("#### ✅ Veritabanında Saklanabilen Alanlar")
             st.markdown("""
             - **Ağ Metrikleri:** TCP RTT gecikmesi (ms), paket kaybı (%), indirme/yükleme hızı (Mbps), RSSI sinyal seviyesi (dBm).
             - **Konum Bilgisi:** Sadece seçilen bina, kat ve bölge adı.
             - **Güven Skoru:** IP aralığı karşılaştırmasıyla üretilen kampüs doğrulama bayrağı (`is_verified`).
             - **Zaman Damgası:** Ölçümün alındığı UTC zaman damgası.
+            - **Wi-Fi tanımlayıcıları:** SSID ve BSSID alanları SQLite'ta ham metin olarak bulunabilir.
             """)
 
         with col_p2:
-            st.markdown("#### ❌ Kesinlikle Saklanmayan Bilgiler")
+            st.markdown("#### ❌ Saklanmayan veya panelde gösterilmeyen bilgiler")
             st.markdown("""
             - **Ham IP Adresi:** Sunucu belleğinde kampüs aralığıyla kıyaslanır ve anında imha edilir, DB'ye yazılmaz.
             - **Ham Cihaz Kimliği (MAC/IMEI):** Saklanmaz; istemci hash üretir, sunucu bunu gizli tuz (`hash_salt`) ile HMAC-SHA256 yapar.
             - **Kişisel Veri:** İsim, soyisim, öğrenci numarası veya web tarama geçmişi toplanmaz.
-            - **Ham BSSID:** Arayüz ve analiz çıktılarında takma adlarla (`AP-1`, `AP-2`) maskelenir.
+            - **Panel görünümü:** SSID gösterilmez; BSSID yalnızca `AP-1`, `AP-2` gibi takma adlarla gösterilir. Bu maskeleme veritabanındaki ham alanı silmez.
             """)
 
         st.markdown("---")

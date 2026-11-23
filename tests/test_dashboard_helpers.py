@@ -15,6 +15,7 @@ from dashboard.helpers import (
     find_underperforming_forecast_zones,
     build_hourly_day_matrix,
     prepare_masked_issues_and_anomalies,
+    get_record_counts,
 )
 
 
@@ -127,6 +128,20 @@ class TestBestSpotSelection:
         assert best["zone"] == "Bölge B"
         assert best["estimated_rtt_ms"] == 15.0
 
+    def test_recommendation_uses_seasonal_forecast_not_zone_median(self):
+        df = pd.DataFrame([
+            {"zone": "Bölge A", "is_weekend": False, "hour": 10, "rtt_ms": 80.0},
+            {"zone": "Bölge A", "is_weekend": False, "hour": 11, "rtt_ms": 20.0},
+            {"zone": "Bölge B", "is_weekend": False, "hour": 10, "rtt_ms": 30.0},
+        ])
+        scores = [
+            {"zone": "Bölge A", "score": 80.0, "status": "iyi", "color": "yeşil"},
+            {"zone": "Bölge B", "score": 80.0, "status": "iyi", "color": "yeşil"},
+        ]
+        best = find_best_spot(df, False, 10, scores)
+        assert best["zone"] == "Bölge B"
+        assert best["estimated_rtt_ms"] == 30.0
+
     def test_empty_data_returns_none(self):
         best = find_best_spot(pd.DataFrame(), is_weekend=False, hour=12, zone_scores=[])
         assert best is None
@@ -164,6 +179,32 @@ class TestMatrixAndMasking:
         assert matrix.shape == (24, 7)
         assert list(matrix.columns) == ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
 
+    def test_matrix_uses_average(self):
+        df = pd.DataFrame({
+            "zone": ["Bölge" , "Bölge"],
+            "rtt_ms": [10.0, 30.0],
+            "dt": pd.to_datetime(["2026-11-23 10:00", "2026-11-23 10:30"]),
+        })
+        matrix = build_hourly_day_matrix(df, "Bölge")
+        assert matrix.loc["10:00", "Pazartesi"] == 20.0
+
+    def test_record_counts_include_verified_and_unverified(self, tmp_path):
+        import sqlite3
+
+        db_path = tmp_path / "counts.db"
+        with sqlite3.connect(db_path) as connection:
+            connection.execute(
+                "CREATE TABLE measurements (is_verified INTEGER, is_simulated INTEGER)"
+            )
+            connection.executemany(
+                "INSERT INTO measurements VALUES (?, ?)",
+                [(1, 1), (0, 1), (1, 0)],
+            )
+        assert get_record_counts("all", db_path) == {
+            "total": 3, "verified": 2, "unverified": 1, "simulated": 2, "real": 1
+        }
+        assert get_record_counts("simulated", db_path)["total"] == 2
+
     def test_prepare_masked_issues_and_anomalies(self):
         issues = [{"title": "Arıza", "bssid": "02:00:00:03:00:02", "details": "AP 02:00:00:03:00:02 sorunlu"}]
         anomalies = [{"title": "Sıçrama", "bssid": None}]
@@ -173,8 +214,8 @@ class TestMatrixAndMasking:
         assert "AP-1" in masked_iss[0]["details"]
 
 
-class TestDashboardAppSmoke:
-    """dashboard/app.py dosyasının geçerli Python sözdizimine sahip olduğunu sınar."""
+class TestDashboardAppSyntax:
+    """Streamlit AppTest Windows olay döngüsünde takıldığı için sözdizimini sınar."""
 
     def test_app_syntax_and_compilation(self):
         app_file = Path(__file__).resolve().parent.parent / "dashboard" / "app.py"

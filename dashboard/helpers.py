@@ -5,7 +5,9 @@ Kesinlikle ham cihaz kimliği (device_hash), SSID veya ham BSSID döndürmez.
 """
 
 from typing import Any
+from pathlib import Path
 import pandas as pd
+from analytics.forecast import predict_seasonal_rtt
 from backend.config import load_config
 from analytics.summary import generate_ap_aliases, mask_issues_bssids
 
@@ -108,17 +110,10 @@ def find_best_spot(
         if z_df.empty or "rtt_ms" not in z_df.columns:
             continue
 
-        # Aynı gün türü ve saatteki ölçümleri filtrele
-        hour_df = z_df[
-            (z_df["is_weekend"] == is_weekend) & (z_df["hour"] == hour)
-        ]["rtt_ms"].dropna()
-
-        if not hour_df.empty:
-            est_rtt = float(hour_df.median())
-        else:
-            # Belirli saatte veri yoksa bölgenin genel medyanına geri düş
-            all_rtt = z_df["rtt_ms"].dropna()
-            est_rtt = float(all_rtt.median()) if not all_rtt.empty else 999.0
+        # Tahmini, analizdeki mevsimsel medyan yöntemiyle aynı fonksiyondan al.
+        est_rtt = predict_seasonal_rtt(df, zone, is_weekend, hour)
+        if est_rtt is None:
+            continue
 
         candidates.append({
             "zone": zone,
@@ -160,7 +155,7 @@ def find_underperforming_forecast_zones(forecast_result: dict[str, Any]) -> list
 
 def build_hourly_day_matrix(df: pd.DataFrame, zone: str) -> pd.DataFrame:
     """
-    Seçilen bölge için Saat (00:00-23:00) x Gün (Pazartesi-Pazar) medyan gecikme matrisini üretir.
+    Seçilen bölge için saat x gün ortalama gecikme matrisini üretir.
     """
     day_names = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
     hours = [f"{h:02d}:00" for h in range(24)]
@@ -177,13 +172,44 @@ def build_hourly_day_matrix(df: pd.DataFrame, zone: str) -> pd.DataFrame:
     z_df["weekday"] = z_df["dt"].dt.day_of_week
     z_df["hour_int"] = z_df["dt"].dt.hour
 
-    grouped = z_df.groupby(["hour_int", "weekday"])["rtt_ms"].median()
+    grouped = z_df.groupby(["hour_int", "weekday"])["rtt_ms"].mean()
 
     for (h, w), val in grouped.items():
         if 0 <= h < 24 and 0 <= w < 7:
             matrix.loc[f"{h:02d}:00", day_names[w]] = round(val, 1)
 
     return matrix
+
+
+def get_record_counts(data_type: str, db_path: str | Path | None = None) -> dict[str, int]:
+    """Seçili veri türünün özet sayılarını SQLite'tan salt okunur alır."""
+    import sqlite3
+    from analytics.data import get_db_path
+
+    target_db = Path(db_path) if db_path is not None else get_db_path()
+    uri = f"{target_db.resolve().as_uri()}?mode=ro"
+    conditions = {
+        "simulated": "WHERE is_simulated = 1",
+        "real": "WHERE is_simulated = 0",
+        "all": "",
+    }
+    if data_type not in conditions:
+        raise ValueError("data_type simulated, real veya all olmalı.")
+
+    with sqlite3.connect(uri, uri=True) as connection:
+        row = connection.execute(
+            "SELECT COUNT(*), COALESCE(SUM(is_verified), 0), "
+            "COALESCE(SUM(is_simulated), 0) FROM measurements "
+            + conditions[data_type]
+        ).fetchone()
+    total, verified, simulated = (int(value) for value in row)
+    return {
+        "total": total,
+        "verified": verified,
+        "unverified": total - verified,
+        "simulated": simulated,
+        "real": total - simulated,
+    }
 
 
 def prepare_masked_issues_and_anomalies(
