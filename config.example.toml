@@ -14,3 +14,47 @@ zones = [
   "Yemekhane Zemin Kat",
   "Öğrenci İşleri Giriş Kat",
 ]
+
+[analytics]
+# Gerçek ölçümlerde yerel saat dilimi ofseti (Türkiye için UTC+3)
+utc_offset_hours = 3
+
+# Bölge değerlendirmesi için asgari örnek sayısı
+min_samples = 20
+
+# Skor bileşen ağırlıkları (toplam: 1.0)
+weight_rtt = 0.30
+weight_loss = 0.25
+weight_download = 0.25
+weight_signal = 0.20
+
+# Metrik normalizasyon eşikleri (iyi -> 1.0, kötü -> 0.0)
+rtt_best_ms = 20.0
+rtt_worst_ms = 150.0
+loss_best_pct = 0.5
+loss_worst_pct = 10.0
+download_best_mbps = 50.0
+download_worst_mbps = 5.0
+signal_best_dbm = -55.0
+signal_worst_dbm = -85.0
+
+# Skor renk eşikleri (>=75 yeşil, 50-75 sarı, <50 kırmızı)
+score_green = 75.0
+score_yellow = 50.0
+
+# Teşhis eşikleri
+congestion_rtt_multiplier = 2.0
+congestion_min_signal_dbm = -70.0
+coverage_poor_signal_dbm = -75.0
+coverage_poor_download_mbps = 5.0
+ap_min_loss_pct = 8.0
+ap_loss_multiplier = 2.0
+min_ap_samples = 10
+min_hour_samples = 2
+min_congestion_samples = 5
+
+# Sağlam Z-Skor anomali eşiği (|z| > 4.0)
+anomaly_z_threshold = 4.0
+
+# Tahmin değerlendirmesi için test gün sayısı
+forecast_test_days = 3
