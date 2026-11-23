@@ -13,7 +13,12 @@ from analytics.data import load_measurements
 from analytics.rules import calculate_zone_scores, diagnose_issues
 from analytics.anomaly import detect_anomalies
 from analytics.forecast import evaluate_forecast, compute_participation_density
-from analytics.summary import generate_ap_aliases, build_analysis_summary, save_summary_files
+from analytics.summary import (
+    generate_ap_aliases,
+    mask_issues_bssids,
+    build_analysis_summary,
+    save_summary_files,
+)
 
 
 def run_pipeline(data_type: str = "simulated", verified_only: bool = True) -> int:
@@ -41,6 +46,9 @@ def run_pipeline(data_type: str = "simulated", verified_only: bool = True) -> in
     print(f"[*] Referans zamanı: {meta['reference_time']}")
     print("-" * 70)
 
+    all_bssids = df["bssid"].dropna().tolist() if "bssid" in df.columns else []
+    alias_map = generate_ap_aliases(all_bssids)
+
     # 1. Bölge Skorları
     zone_scores = calculate_zone_scores(df, config)
     print("\n[1] BÖLGE SAĞLIK SKORLARI (0-100)")
@@ -58,16 +66,17 @@ def run_pipeline(data_type: str = "simulated", verified_only: bool = True) -> in
 
     # 2. Kural Tabanlı Sorun Teşhisi
     issues = diagnose_issues(df, config)
+    display_issues = mask_issues_bssids(issues, alias_map)
     print(f"\n[2] KURAL TABANLI TESPİT EDİLEN SORUNLAR ({len(issues)} adet)")
     print("-" * 70)
     if not issues:
         print("  Belirgin bir kural ihlali veya kronik sorun tespit edilmedi.")
     else:
-        for idx, iss in enumerate(issues, start=1):
+        for idx, iss in enumerate(display_issues, start=1):
             print(f"  {idx}. [{iss['title'].upper()}] - {iss['zone']}")
             print(f"     Zaman Aralığı: {iss['time_window']}")
             if iss.get("bssid"):
-                print(f"     İlgili AP (Ham BSSID): {iss['bssid']}")
+                print(f"     İlgili AP (takma ad): {iss['bssid']}")
             print(f"     Açıklama: {iss['details']}")
             print()
 
@@ -124,9 +133,6 @@ def run_pipeline(data_type: str = "simulated", verified_only: bool = True) -> in
         print(f"    Tahmin durumu: {participation_forecast.get('status')}")
 
     # 6. Gizlilik ve Dışa Aktarma
-    all_bssids = df["bssid"].dropna().tolist() if "bssid" in df.columns else []
-    alias_map = generate_ap_aliases(all_bssids)
-
     summary_data = build_analysis_summary(
         metadata=meta,
         zone_scores=zone_scores,

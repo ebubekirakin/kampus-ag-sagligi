@@ -15,6 +15,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 from unittest.mock import patch
+import analytics.run as analytics_run
 import pandas as pd
 import pytest
 
@@ -32,8 +33,10 @@ from analytics.summary import (
     build_analysis_summary,
 )
 from analytics.evaluate import (
+    _classify_extra_findings,
     _detection_interval,
     _expected_outage_interval,
+    _generate_markdown_report,
     _intervals_overlap,
     _matches_congestion,
 )
@@ -301,8 +304,8 @@ class TestAnomalyDetection:
         assert outage["baseline_median"] == 50.0
         assert outage["robust_z"] > 4.0
 
-    def test_negative_robust_z_score_is_anomaly(self, mock_analytics_config):
-        """Beklenenden çok düşük ölçüm de mutlak Z-skor eşiğiyle yakalanır."""
+    def test_negative_robust_z_score_is_not_reported(self, mock_analytics_config):
+        """Sorun olmayan düşük RTT anomalisi raporlanmamalıdır."""
         start = datetime(2026, 11, 2, 14, 0, tzinfo=timezone.utc)
         records = []
         for index, value in enumerate((100.0, 100.0, 100.0, 0.0)):
@@ -315,12 +318,28 @@ class TestAnomalyDetection:
                     "dt": date + timedelta(minutes=sample * 10),
                 })
         anomalies = detect_anomalies(pd.DataFrame(records), mock_analytics_config)
-        low_rtt = [
-            item for item in anomalies
-            if item["metric"] == "rtt_ms" and item["direction"] == "low"
-        ]
-        assert low_rtt
-        assert low_rtt[0]["robust_z"] < -4
+        assert not anomalies
+
+    def test_only_high_rtt_and_loss_directions_are_reported(self, mock_analytics_config):
+        """Yüksek sorun değerleri bulunur, düşük değerler sonuçlara girmez."""
+        start = datetime(2026, 11, 2, 14, 0, tzinfo=timezone.utc)
+        values = [100.0, 100.0, 100.0, 100.0, 0.0, 1000.0]
+        loss_values = [0.5, 0.5, 0.5, 0.5, 0.0, 50.0]
+        records = []
+        for day, (rtt, loss) in enumerate(zip(values, loss_values)):
+            for sample in range(3):
+                records.append({
+                    "zone": "Test Bölgesi A",
+                    "rtt_ms": rtt,
+                    "loss_pct": loss,
+                    "dt": start + timedelta(days=7 * day, minutes=sample * 10),
+                })
+
+        anomalies = detect_anomalies(pd.DataFrame(records), mock_analytics_config)
+
+        assert anomalies
+        assert all(item["direction"] == "high" for item in anomalies)
+        assert {item["metric"] for item in anomalies} == {"rtt_ms", "loss_pct"}
 
     def test_known_outlier_detected_with_high_z_score(self, mock_analytics_config):
         """Tek bir günde meydana gelen büyük gecikme sıçraması z > 4.0 ile tespit edilmelidir."""
@@ -567,3 +586,67 @@ class TestGroundTruthMatching:
 
         assert _matches_congestion(scenario, overlapping, utc_offset=3)
         assert not _matches_congestion(scenario, unrelated, utc_offset=3)
+
+    def test_extra_findings_are_grouped_from_ground_truth_type_and_zone(self):
+        scenarios = [
+            {"issue_type": "high_latency", "zone": "Kütüphane", "time_window": "Hafta içi 16:00-19:00"},
+            {"issue_type": "high_packet_loss", "zone": "Yemekhane", "bssid": "test-ap", "time_window": "Sürekli"},
+        ]
+        detections = [
+            {"issue_type": "anomaly", "zone": "Kütüphane", "metric": "rtt_ms", "direction": "high", "date": "2026-11-03", "time_window": "2026-11-03 17:00-18:00"},
+            {"issue_type": "anomaly", "zone": "Yemekhane", "metric": "loss_pct", "direction": "high", "date": "2026-11-03", "time_window": "2026-11-03 17:00-18:00"},
+            {"issue_type": "anomaly", "zone": "Kütüphane", "metric": "rtt_ms", "direction": "high", "date": "2026-11-03", "time_window": "2026-11-03 12:00-13:00"},
+            {"issue_type": "anomaly", "zone": "Başka Bölge", "metric": "loss_pct", "direction": "high", "date": "2026-11-03", "time_window": "2026-11-03 17:00-18:00"},
+        ]
+
+        related, unrelated = _classify_extra_findings(
+            detections, set(), scenarios, datetime(2026, 11, 2).date(), 0
+        )
+        sample_result = [{
+            "status": "Bulundu",
+            "title": "Örnek senaryo",
+            "zone": "Kütüphane",
+            "expected_time": "16:00-19:00",
+            "detected_by": "rules",
+            "detected_info": "Örnek kanıt",
+        }]
+        markdown = _generate_markdown_report(sample_result, related, unrelated)
+
+        assert len(related) == 2
+        assert len(unrelated) == 2
+        assert "Gömülü Senaryoyla İlişkili Ek Bulgular" in markdown
+        assert "İlgisiz Yanlış Alarmlar" in markdown
+
+
+def test_analytics_run_masks_raw_bssid(capsys):
+    """Terminal analiz raporunda ham BSSID yerine AP takma adı gösterilir."""
+    raw_bssid = "02:00:00:00:00:99"
+    data = pd.DataFrame({"bssid": [raw_bssid]})
+    metadata = {
+        "total_records": 1,
+        "min_time": "2026-11-02T00:00:00+00:00",
+        "max_time": "2026-11-02T00:00:00+00:00",
+        "reference_time": "2026-11-02T00:00:00+00:00",
+    }
+    issue = {
+        "title": "Arızalı AP",
+        "zone": "Test Bölgesi",
+        "time_window": "Sürekli",
+        "bssid": raw_bssid,
+        "details": f"BSSID {raw_bssid} sorunlu",
+    }
+
+    with patch.object(analytics_run, "load_config", return_value={}), \
+         patch.object(analytics_run, "load_measurements", return_value=(data, metadata)), \
+         patch.object(analytics_run, "calculate_zone_scores", return_value=[]), \
+         patch.object(analytics_run, "diagnose_issues", return_value=[issue]), \
+         patch.object(analytics_run, "detect_anomalies", return_value=[]), \
+         patch.object(analytics_run, "evaluate_forecast", return_value={"status": "yetersiz veri"}), \
+         patch.object(analytics_run, "compute_participation_density", return_value={"hourly_distribution": {}, "peak_hour": "-", "quiet_hour": "-", "methodological_note": "test"}), \
+         patch.object(analytics_run, "save_summary_files", return_value=(Path("summary.json"), Path("aliases.json"))):
+        result = analytics_run.run_pipeline()
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert raw_bssid not in output
+    assert "AP-1" in output

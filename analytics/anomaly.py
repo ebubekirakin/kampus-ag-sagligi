@@ -67,11 +67,12 @@ def detect_anomalies(df: pd.DataFrame, config: dict | None = None) -> list[dict[
 
                     observed = float(row["median"])
                     robust_z = (observed - baseline) / (1.4826 * safe_mad)
-                    if abs(robust_z) <= z_threshold:
+                    # Sorun yönü yalnızca yüksek gecikme veya yüksek kayıptır.
+                    if robust_z <= z_threshold:
                         continue
 
-                    direction = "high" if robust_z > 0 else "low"
-                    direction_text = "yüksek" if direction == "high" else "düşük"
+                    direction = "high"
+                    direction_text = "yüksek"
                     anomalies.append({
                         "zone": zone,
                         "date": str(row["day_str"]),

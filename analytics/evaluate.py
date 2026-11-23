@@ -116,34 +116,110 @@ def evaluate_detection(
             "matched_detection": matching_detection,
         })
 
-    # Bilinen senaryoların zamanında görülen ek ölçüt anomalilerini tekrar alarm sayma.
-    found_scenarios = [
-        (gt, result)
-        for gt, result in zip(ground_truth, evaluation_results)
-        if result["status"] == "Bulundu"
-    ]
-    false_positives = []
-    for idx, det in enumerate(all_detections):
-        if idx in matched_indices:
-            continue
-        if any(
-            _is_explained_by_scenario(gt, det, first_date, utc_offset)
-            for gt, _ in found_scenarios
-        ):
-            continue
-        false_positives.append(det)
+    related_findings, false_positives = _classify_extra_findings(
+        all_detections,
+        matched_indices,
+        ground_truth,
+        first_date,
+        utc_offset,
+    )
 
     # Markdown raporunu üret
     md_file = output_md or (BASE_DIR / "data" / "evaluation_result.md")
-    md_content = _generate_markdown_report(evaluation_results, false_positives)
+    md_content = _generate_markdown_report(
+        evaluation_results, related_findings, false_positives
+    )
     with open(md_file, "w", encoding="utf-8") as f:
         f.write(md_content)
 
     return {
         "results": evaluation_results,
+        "related_findings": related_findings,
         "false_positives": false_positives,
         "markdown_path": md_file,
     }
+
+
+def _classify_extra_findings(
+    detections: list[dict[str, Any]],
+    matched_indices: set[int],
+    ground_truth: list[dict[str, Any]],
+    first_date,
+    utc_offset: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Eşleşmemiş bulguları, ground truth türü ve bölgesine göre ayırır."""
+    related = []
+    unrelated = []
+    for index, detection in enumerate(detections):
+        if index in matched_indices:
+            continue
+        if any(
+            _is_related_extra_finding(detection, scenario, first_date, utc_offset)
+            for scenario in ground_truth
+        ):
+            related.append(detection)
+        else:
+            unrelated.append(detection)
+    return related, unrelated
+
+
+def _is_related_extra_finding(
+    detection: dict[str, Any],
+    scenario: dict[str, Any],
+    first_date,
+    utc_offset: int,
+) -> bool:
+    """Bir ek bulgunun ground truth senaryosuyla tür ve bölge bağını denetler."""
+    if detection.get("zone") != scenario.get("zone"):
+        return False
+
+    scenario_type = scenario.get("issue_type")
+    detected_type = detection.get("issue_type")
+    if detected_type == "anomaly":
+        metric = detection.get("metric")
+        direction = detection.get("direction")
+        if scenario_type == "high_latency":
+            interval = _detection_interval(detection)
+            return bool(
+                metric == "rtt_ms"
+                and direction == "high"
+                and interval
+                and interval[0].weekday() < 5
+                and _matches_congestion(
+                    scenario,
+                    {**detection, "issue_type": "congestion"},
+                    utc_offset,
+                )
+            )
+        if scenario_type == "high_packet_loss":
+            return metric == "loss_pct" and direction == "high"
+        if scenario_type == "service_outage":
+            expected = _expected_outage_interval(scenario, first_date, utc_offset)
+            return bool(
+                metric in ("rtt_ms", "loss_pct")
+                and direction == "high"
+                and expected
+                and _intervals_overlap(expected, _detection_interval(detection))
+            )
+        return False
+
+    expected_type = {
+        "high_latency": "congestion",
+        "low_signal_low_throughput": "coverage_gap",
+        "high_packet_loss": "faulty_ap",
+        "service_outage": "anomaly",
+    }.get(scenario_type)
+    if detected_type != expected_type:
+        return False
+    if scenario_type == "high_latency":
+        return _matches_congestion(scenario, detection, utc_offset)
+    if scenario_type == "service_outage":
+        expected = _expected_outage_interval(scenario, first_date, utc_offset)
+        return bool(expected and _intervals_overlap(expected, _detection_interval(detection)))
+    if scenario_type == "high_packet_loss":
+        expected_bssid = scenario.get("bssid")
+        return not expected_bssid or detection.get("bssid") == expected_bssid
+    return True
 
 
 def _clock_range(value: str) -> tuple[time, time] | None:
@@ -209,37 +285,6 @@ def _matches_congestion(
     )
 
 
-def _is_explained_by_scenario(
-    scenario: dict[str, Any],
-    detection: dict[str, Any],
-    first_date,
-    utc_offset: int,
-) -> bool:
-    """Eşleşmiş bir arızanın aynı belirti ve zamanda ürettiği ek alarmı ayıklar."""
-    if detection.get("issue_type") != "anomaly" or detection.get("zone") != scenario.get("zone"):
-        return False
-
-    if scenario.get("scenario_id") == "congestion":
-        interval = _detection_interval(detection)
-        clocks = _clock_range(scenario.get("time_window", ""))
-        if not interval or not clocks or interval[0].weekday() >= 5:
-            return False
-        expected = (
-            datetime.combine(interval[0].date(), clocks[0]) + timedelta(hours=utc_offset),
-            datetime.combine(interval[0].date(), clocks[1]) + timedelta(hours=utc_offset),
-        )
-        return detection.get("metric") == "rtt_ms" and detection.get("direction") == "high" and _intervals_overlap(expected, interval)
-
-    if scenario.get("scenario_id") == "faulty_ap":
-        return detection.get("zone") == scenario.get("zone") and detection.get("direction") == "high"
-
-    if scenario.get("scenario_id") == "sudden_outage":
-        expected = _expected_outage_interval(scenario, first_date, utc_offset)
-        return bool(expected and _intervals_overlap(expected, _detection_interval(detection)))
-
-    return False
-
-
 def _miss_reason(scenario_id: str) -> str:
     """Bulunamayan senaryolar için olası nedenleri rapora ekler."""
     if scenario_id == "sudden_outage":
@@ -249,6 +294,7 @@ def _miss_reason(scenario_id: str) -> str:
 
 def _generate_markdown_report(
     results: list[dict[str, Any]],
+    related_findings: list[dict[str, Any]],
     false_positives: list[dict[str, Any]],
 ) -> str:
     """Değerlendirme sonucunu tez için temiz bir Markdown tablosuna dönüştürür."""
@@ -260,7 +306,8 @@ def _generate_markdown_report(
         "",
         f"**Tarih:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}  ",
         f"**Başarı Oranı:** {found_count} / {total_count} senaryo başarıyla tespit edildi (%{(found_count/total_count)*100:.1f})  ",
-        f"**Yanlış Alarm / Ek Tespit Sayısı:** {len(false_positives)} adet  ",
+        f"**Gömülü senaryoyla ilişkili ek bulgu:** {len(related_findings)} adet  ",
+        f"**İlgisiz yanlış alarm:** {len(false_positives)} adet  ",
         "",
         "## 1. Bilinen Senaryolar (Ground Truth Karşılaştırması)",
         "",
@@ -277,25 +324,37 @@ def _generate_markdown_report(
 
     lines.extend([
         "",
-        "## 2. Ek Tespitler ve Yanlış Alarm Değerlendirmesi",
+        "## 2. Gömülü Senaryoyla İlişkili Ek Bulgular",
         "",
     ])
 
-    if not false_positives:
-        lines.append("Ek yanlış alarm bulunmamaktadır.")
-    else:
-        lines.append(
-            "Aşağıdaki bulgular eşleşmiş bilinen senaryoların belirti ve zaman aralığıyla açıklanamayan ek teşhislerdir:"
-        )
-        lines.append("")
-        lines.append("| Tip | Bölge | Zaman | Z-Skor / Detay |")
-        lines.append("|---|---|---|---|")
-        for fp in false_positives:
-            z_info = f"z={fp.get('robust_z')}" if "robust_z" in fp else fp.get("issue_type")
-            lines.append(f"| {fp.get('title')} | {fp.get('zone')} | {fp.get('time_window')} | {z_info} |")
-
+    _append_findings_table(lines, related_findings)
+    lines.extend(["", "## 3. İlgisiz Yanlış Alarmlar", ""])
+    _append_findings_table(lines, false_positives)
     lines.append("")
     return "\n".join(lines)
+
+
+def _append_findings_table(lines: list[str], findings: list[dict[str, Any]]) -> None:
+    """Ek bulgu grubunu Markdown tablosu olarak ekler."""
+    if not findings:
+        lines.append("Bu grupta bulgu yok.")
+        return
+
+    lines.extend([
+        "| Tip | Bölge | Zaman | Z-Skor / Detay |",
+        "|---|---|---|---|",
+    ])
+    for finding in findings:
+        z_info = (
+            f"z={finding.get('robust_z')}"
+            if "robust_z" in finding
+            else finding.get("issue_type")
+        )
+        lines.append(
+            f"| {finding.get('title')} | {finding.get('zone')} | "
+            f"{finding.get('time_window')} | {z_info} |"
+        )
 
 
 def main():
@@ -310,6 +369,7 @@ def main():
         return 1
 
     results = eval_data["results"]
+    related = eval_data["related_findings"]
     fps = eval_data["false_positives"]
 
     print(f"{'Senaryo':<26} {'Bölge':<32} {'Durum':<12} {'Modül':<10}")
@@ -322,7 +382,8 @@ def main():
     for r in results:
         print(f" - {r['title']} ({r['zone']}): {r['detected_info']}")
 
-    print(f"\nEk Tespit / Yanlış Alarm Sayısı: {len(fps)} adet")
+    print(f"\nGömülü senaryoyla ilişkili ek bulgu: {len(related)} adet")
+    print(f"İlgisiz yanlış alarm: {len(fps)} adet")
     print(f"[OK] Rapor oluşturuldu: {eval_data['markdown_path']}")
     print("=" * 70 + "\n")
     return 0
