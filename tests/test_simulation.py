@@ -55,6 +55,14 @@ class TestSimulation(unittest.TestCase):
 
         outage = [item for item in measurements if item["rtt_ms"] >= 500]
         self.assertTrue(outage, "Yedinci gün için bir kesinti ölçümü bulunmalı.")
+        outage_scenario = scenarios[3]
+        explicit_outage_rows = [
+            item for item in measurements
+            if item["zone"] == outage_scenario["zone"]
+            and item["timestamp"].startswith("2026-11-08T14:")
+            and item["rtt_ms"] == 650.0
+        ]
+        self.assertEqual(len(explicit_outage_rows), 3)
         outside = [item for item in measurements if item["is_verified"] == 0]
         self.assertTrue(outside, "Kampüs dışı ölçümler de üretilmeli.")
         self.assertTrue(all(item["campus_confidence"] < 0.5 for item in outside))

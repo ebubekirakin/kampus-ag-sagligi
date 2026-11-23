@@ -132,7 +132,103 @@ def evaluate_forecast(df: pd.DataFrame, config: dict | None = None) -> dict[str,
     }
 
 
-def compute_participation_density(df: pd.DataFrame) -> dict[str, Any]:
+def evaluate_participation_forecast(
+    df: pd.DataFrame, config: dict | None = None
+) -> dict[str, Any]:
+    """Saatlik katılım sayısını son günlerde test edip mevsimsel medyanla kıyaslar."""
+    if config is None:
+        config = load_config()
+    test_days = config.get("analytics", {}).get("forecast_test_days", 3)
+    if df.empty or "dt" not in df.columns or "zone" not in df.columns:
+        return {"status": "yetersiz veri", "zone_comparison": []}
+
+    valid = df.dropna(subset=["dt", "zone"]).copy()
+    if valid.empty:
+        return {"status": "yetersiz veri", "zone_comparison": []}
+
+    # Her bölge ve saat için sıfır ölçüm olan saatleri de tabloya kat.
+    first_hour = valid["dt"].min().normalize()
+    last_hour = valid["dt"].max().floor("h")
+    hours = pd.date_range(first_hour, last_hour, freq="h")
+    zones = sorted(valid["zone"].unique())
+    grid = pd.MultiIndex.from_product(
+        [zones, hours], names=["zone", "hour_start"]
+    ).to_frame(index=False)
+
+    valid["hour_start"] = valid["dt"].dt.floor("h")
+    counts = (
+        valid.groupby(["zone", "hour_start"]).size()
+        .rename("count")
+        .reset_index()
+    )
+    hourly = grid.merge(counts, on=["zone", "hour_start"], how="left")
+    hourly["count"] = hourly["count"].fillna(0).astype(int)
+    hourly["hour"] = hourly["hour_start"].dt.hour
+    hourly["is_weekend"] = hourly["hour_start"].dt.day_of_week >= 5
+
+    reference_time = valid["dt"].max()
+    split_time = reference_time - pd.Timedelta(days=test_days)
+    # Bölünme saat içindeyse o saati eğitime katma; test verisi sızmasın.
+    split_hour = split_time.floor("h")
+    train = hourly[hourly["hour_start"] < split_hour]
+    test = hourly[hourly["hour_start"] >= split_hour]
+    if train.empty or test.empty:
+        return {
+            "status": "yetersiz veri aralığı",
+            "train_hour_count": len(train),
+            "test_hour_count": len(test),
+            "zone_comparison": [],
+        }
+
+    # Eğitim verisinden bölge taban çizgisi ve saat/gün türü mevsimsel medyanı çıkar.
+    zone_baseline = train.groupby("zone")["count"].median().to_dict()
+    global_baseline = float(train["count"].median())
+    seasonal = train.groupby(["zone", "is_weekend", "hour"])["count"].median().to_dict()
+    prediction_rows = test.copy()
+    prediction_rows["predicted_seasonal"] = [
+        seasonal.get(
+            (row.zone, row.is_weekend, row.hour),
+            zone_baseline.get(row.zone, global_baseline),
+        )
+        for row in prediction_rows.itertuples()
+    ]
+    prediction_rows["predicted_baseline"] = [
+        zone_baseline.get(zone, global_baseline)
+        for zone in prediction_rows["zone"]
+    ]
+    prediction_rows["error_seasonal"] = (
+        prediction_rows["count"] - prediction_rows["predicted_seasonal"]
+    ).abs()
+    prediction_rows["error_baseline"] = (
+        prediction_rows["count"] - prediction_rows["predicted_baseline"]
+    ).abs()
+
+    comparisons = []
+    for zone, rows in prediction_rows.groupby("zone"):
+        mae_seasonal = float(rows["error_seasonal"].mean())
+        mae_baseline = float(rows["error_baseline"].mean())
+        comparisons.append({
+            "zone": zone,
+            "test_hours": len(rows),
+            "mae_seasonal": round(mae_seasonal, 2),
+            "mae_baseline": round(mae_baseline, 2),
+            "mae_difference": round(mae_baseline - mae_seasonal, 2),
+        })
+
+    return {
+        "status": "başarılı",
+        "split_time": str(split_time),
+        "train_hour_count": len(train),
+        "test_hour_count": len(test),
+        "mae_seasonal": round(float(prediction_rows["error_seasonal"].mean()), 2),
+        "mae_baseline": round(float(prediction_rows["error_baseline"].mean()), 2),
+        "zone_comparison": comparisons,
+    }
+
+
+def compute_participation_density(
+    df: pd.DataFrame, config: dict | None = None
+) -> dict[str, Any]:
     """
     Saatlik ölçüm katılım yoğunluğunu (örnek sayısını) çıkarır.
     
@@ -141,7 +237,7 @@ def compute_participation_density(df: pd.DataFrame) -> dict[str, Any]:
     (katılımcı yoğunluğunu) gösterir.
     """
     if df.empty or "hour" not in df.columns:
-        return {"hourly_counts": {}, "note": ""}
+        return {"hourly_distribution": {}, "methodological_note": ""}
 
     hourly_dist = df["hour"].value_counts().sort_index().to_dict()
     # 0-23 arası tüm saatleri doldur
@@ -156,6 +252,7 @@ def compute_participation_density(df: pd.DataFrame) -> dict[str, Any]:
         "peak_hour": peak_hour,
         "quiet_hour": quiet_hour,
         "total_measurements": len(df),
+        "forecast": evaluate_participation_forecast(df, config),
         "methodological_note": (
             "Bu tablo ağ bant genişliği kullanımını değil, kullanıcıların "
             "ölçüm yapma/katılım sıklığını göstermektedir."

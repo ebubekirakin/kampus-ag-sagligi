@@ -228,12 +228,11 @@ def generate_measurements(days: int = 14, seed: int = 42) -> tuple[list[dict], l
                     "timestamp": timestamp.isoformat(),
                 })
 
-    # 14 günlük çalıştırmada kesinti senaryosu mutlaka bir satırla temsil edilir.
+    # Kesinti saati varsayılan asgari saatlik örnek sayısını da karşılasın.
     if days >= 7:
         zone = ground_truth[3]["zone"]
         building, floor = parse_building_floor(zone)
-        outage_time = SIMULATION_START_ANCHOR + timedelta(days=6, hours=6, minutes=30)
-        measurements.append({
+        outage_sample = {
             "device_hash": device_hashes[0],
             "source": "desktop",
             "ssid": "Kampus_WiFi",
@@ -249,8 +248,15 @@ def generate_measurements(days: int = 14, seed: int = 42) -> tuple[list[dict], l
             "campus_confidence": 0.99,
             "is_verified": 1,
             "is_simulated": 1,
-            "timestamp": outage_time.isoformat(),
-        })
+        }
+        for minute in (10, 30, 50):
+            outage_time = SIMULATION_START_ANCHOR + timedelta(
+                days=6, hours=6, minutes=minute
+            )
+            measurements.append({
+                **outage_sample,
+                "timestamp": outage_time.isoformat(),
+            })
 
     return measurements, ground_truth
 

@@ -4,7 +4,6 @@ SQLite veritabanından doğrudan ve salt okunur biçimde ölçümleri okur,
 zaman damgalarını yerel saat dilimine göre ayrıştırır.
 """
 
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import pandas as pd
@@ -37,6 +36,9 @@ def load_measurements(
     Dönüş:
         (df, metadata)
     """
+    if data_type not in ("simulated", "real", "all"):
+        raise ValueError("data_type 'simulated', 'real' veya 'all' olmalı.")
+
     target_db = db_path or get_db_path()
     if not target_db.exists():
         raise FileNotFoundError(f"Veritabanı dosyası bulunamadı: {target_db}")
@@ -45,9 +47,10 @@ def load_measurements(
     analytics_cfg = config.get("analytics", {})
     if utc_offset_hours is None:
         utc_offset_hours = analytics_cfg.get("utc_offset_hours", 3)
+    effective_offset = 0 if data_type == "simulated" else utc_offset_hours
+    time_basis = "UTC" if effective_offset == 0 else f"UTC{effective_offset:+g}"
 
     query = "SELECT * FROM measurements WHERE 1=1"
-    params = []
 
     if data_type == "simulated":
         query += " AND is_simulated = 1"
@@ -61,15 +64,17 @@ def load_measurements(
 
     query += " ORDER BY id ASC"
 
-    # Salt okunur bağlantı aç
-    uri = f"file:{target_db.resolve()}?mode=ro"
+    # Windows yollarını da doğru kaçışlayan URI ile salt okunur aç.
+    uri = f"{target_db.resolve().as_uri()}?mode=ro"
     try:
         conn = sqlite3.connect(uri, uri=True)
-    except sqlite3.OperationalError:
-        conn = sqlite3.connect(str(target_db.resolve()))
+    except sqlite3.Error as error:
+        raise RuntimeError(
+            f"Veritabanı salt okunur açılamadı: {target_db}"
+        ) from error
 
     try:
-        df = pd.read_sql_query(query, conn, params=params)
+        df = pd.read_sql_query(query, conn)
     finally:
         conn.close()
 
@@ -77,16 +82,16 @@ def load_measurements(
         return df, {
             "total_records": 0,
             "data_type": data_type,
+            "verified_only": verified_only,
+            "utc_offset_hours": effective_offset,
+            "time_basis": time_basis,
             "reference_time": None,
             "min_time": None,
             "max_time": None,
         }
 
-    # Zaman damgalarını ayrıştır ve standardize et
-    # Simülasyon verisi doğrudan UTC bazlı saat diliminde üretilir (offset=0).
-    # Gerçek ölçümler ise UTC damgalı olduğundan yerel saat ofseti (örn: UTC+3) eklenir.
-    effective_offset = 0 if data_type == "simulated" else utc_offset_hours
-
+    # Tüm kayıtlar UTC saklanır. Gerçek ve açıkça karışık veri analizinde
+    # karşılaştırılabilir yerel saat için bütün satırlara aynı ofset uygulanır.
     # ISO string'leri UTC datetime'a çevir
     df["dt_utc"] = pd.to_datetime(df["timestamp"], utc=True)
     if effective_offset != 0:
@@ -96,7 +101,7 @@ def load_measurements(
 
     # Saat, hafta içi/sonu ve tarih sütunları
     df["hour"] = df["dt"].dt.hour
-    df["is_weekend"] = df["dt"].dt.weekday >= 5
+    df["is_weekend"] = df["dt"].dt.day_of_week >= 5
     df["day_str"] = df["dt"].dt.strftime("%Y-%m-%d")
 
     # "Şimdi" yerine verideki en son zaman damgası referans alınır (simülasyon tutarlılığı için)
@@ -108,6 +113,7 @@ def load_measurements(
         "data_type": data_type,
         "verified_only": verified_only,
         "utc_offset_hours": effective_offset,
+        "time_basis": time_basis,
         "reference_time": reference_time,
         "min_time": min_time,
         "max_time": reference_time,

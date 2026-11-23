@@ -74,3 +74,14 @@ python -m client.main --repeat 1
 ```
 
 İstemci tekrarlarını `--repeat 5 --interval 60` ile ayarlayabilirsin. Gerçek ölçümleri `/docs` içindeki `GET /measurements` isteğinde `is_simulated=0` filtresi ve `X-API-Key` başlığıyla görüntüle. `GET /zones` bölge isimleri içerdiğinden anahtarsız kalır.
+
+## Analizi çalıştırma
+
+Doğrulanmış simüle veriyi analiz etmek için:
+
+```powershell
+python -m analytics.run --data simulated
+python -m analytics.evaluate
+```
+
+`--data real` gerçek ölçümleri, `--data all` ise iki veri türünü açıkça birlikte seçer. Varsayılan analiz yalnızca `is_verified=1` kayıtlarını alır; `--include-unverified` bu filtreyi kaldırır. Simüle zamanlar UTC, gerçek ve `all` analizindeki zamanlar `config.toml` içindeki `analytics.utc_offset_hours` kadar kaydırılır. Katılım grafiği ve tahmini ağ trafiğini değil, kullanıcıların ölçüm gönderme sayısını gösterir; raporlar `data/analysis_summary.json` ve `data/evaluation_result.md` dosyalarına yazılır.

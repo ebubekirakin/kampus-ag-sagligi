@@ -11,16 +11,31 @@ Bölüm 5 gereksinimlerine göre:
 
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
+import sqlite3
+import tempfile
+from unittest.mock import patch
 import pandas as pd
 import pytest
 
+from analytics.data import load_measurements
 from analytics.rules import calculate_zone_scores, diagnose_issues
 from analytics.anomaly import detect_anomalies
-from analytics.forecast import evaluate_forecast, compute_participation_density
+from analytics.forecast import (
+    evaluate_forecast,
+    compute_participation_density,
+    evaluate_participation_forecast,
+)
 from analytics.summary import (
     generate_ap_aliases,
     mask_issues_bssids,
     build_analysis_summary,
+)
+from analytics.evaluate import (
+    _detection_interval,
+    _expected_outage_interval,
+    _intervals_overlap,
+    _matches_congestion,
 )
 
 
@@ -52,8 +67,9 @@ def mock_analytics_config():
             "ap_min_loss_pct": 8.0,
             "ap_loss_multiplier": 2.0,
             "min_ap_samples": 10,
-            "min_hour_samples": 2,
+            "min_hour_samples": 3,
             "anomaly_z_threshold": 4.0,
+            "anomaly_mad_floor": 0.1,
             "forecast_test_days": 3,
         },
     }
@@ -197,6 +213,19 @@ class TestRuleDiagnosis:
         assert len(f_ap) == 1
         assert f_ap[0]["bssid"] == "02:00:00:00:00:02"
 
+    def test_faulty_ap_requires_enough_neighbor_samples(self, mock_analytics_config):
+        """Kıyas AP'sinde yeterli veri yoksa arızalı AP kararı verilmemelidir."""
+        records = [
+            {"zone": "Test Bölgesi A", "bssid": "AP-A", "loss_pct": 18.0}
+            for _ in range(15)
+        ]
+        records.extend([
+            {"zone": "Test Bölgesi A", "bssid": "AP-B", "loss_pct": 0.5}
+            for _ in range(2)
+        ])
+        issues = diagnose_issues(pd.DataFrame(records), mock_analytics_config)
+        assert not [issue for issue in issues if issue["issue_type"] == "faulty_ap"]
+
 
 class TestAnomalyDetection:
     """MAD ve Sağlam Z-Skor anomali tespit testleri."""
@@ -220,11 +249,49 @@ class TestAnomalyDetection:
         anomalies = detect_anomalies(df, mock_analytics_config)
         assert len(anomalies) == 0
 
+    def test_weekday_and_weekend_use_separate_hour_baselines(self, mock_analytics_config):
+        """Hafta sonunun kendi normal seviyesi hafta içiyle kıyaslanmamalıdır."""
+        start = datetime(2026, 11, 2, 14, 0, tzinfo=timezone.utc)
+        records = []
+        for day in range(14):
+            date = start + timedelta(days=day)
+            value = 400.0 if date.weekday() >= 5 else 50.0
+            for sample in range(3):
+                records.append({
+                    "zone": "Test Bölgesi A",
+                    "rtt_ms": value,
+                    "loss_pct": 0.5,
+                    "dt": date + timedelta(minutes=sample * 10),
+                })
+        anomalies = detect_anomalies(pd.DataFrame(records), mock_analytics_config)
+        assert anomalies == []
+
+    def test_negative_robust_z_score_is_anomaly(self, mock_analytics_config):
+        """Beklenenden çok düşük ölçüm de mutlak Z-skor eşiğiyle yakalanır."""
+        start = datetime(2026, 11, 2, 14, 0, tzinfo=timezone.utc)
+        records = []
+        for index, value in enumerate((100.0, 100.0, 100.0, 0.0)):
+            date = start + timedelta(days=7 * index)
+            for sample in range(3):
+                records.append({
+                    "zone": "Test Bölgesi A",
+                    "rtt_ms": value,
+                    "loss_pct": 0.5,
+                    "dt": date + timedelta(minutes=sample * 10),
+                })
+        anomalies = detect_anomalies(pd.DataFrame(records), mock_analytics_config)
+        low_rtt = [
+            item for item in anomalies
+            if item["metric"] == "rtt_ms" and item["direction"] == "low"
+        ]
+        assert low_rtt
+        assert low_rtt[0]["robust_z"] < -4
+
     def test_known_outlier_detected_with_high_z_score(self, mock_analytics_config):
         """Tek bir günde meydana gelen büyük gecikme sıçraması z > 4.0 ile tespit edilmelidir."""
         base_dt = datetime(2026, 11, 2, 8, 0, tzinfo=timezone.utc)
         records = []
-        for d in range(7):
+        for d in range(14):
             for h in range(8, 20):
                 records.append({
                     "zone": "Test Bölgesi A",
@@ -296,6 +363,92 @@ class TestForecastAndLeakage:
         # Taban model eğitim medyanı 20.0 ms olmalı, test verisindeki 150.0 ms ise MAE'yi (150 - 20) = 130 yapmalıdır
         assert abs(res["mae_baseline"] - 130.0) < 0.1
 
+    def test_participation_forecast_splits_time_and_reports_zone_mae(self, mock_analytics_config):
+        """Katılım tahmini son üç günü testte tutar ve bölge MAE tablosu üretir."""
+        start = datetime(2026, 11, 2, 0, 0, tzinfo=timezone.utc)
+        records = []
+        for day in range(10):
+            for hour in range(24):
+                for zone in ("Test Bölgesi A", "Test Bölgesi B"):
+                    count = 8 if day >= 7 and hour == 12 else 2
+                    for sample in range(count):
+                        records.append({
+                            "zone": zone,
+                            "dt": start + timedelta(days=day, hours=hour, minutes=sample),
+                            "hour": hour,
+                            "is_weekend": (start + timedelta(days=day)).weekday() >= 5,
+                        })
+
+        df = pd.DataFrame(records)
+        result = evaluate_participation_forecast(df, mock_analytics_config)
+        density = compute_participation_density(df, mock_analytics_config)
+
+        assert result["status"] == "başarılı"
+        assert result["train_hour_count"] == (6 * 24 + 23) * 2
+        assert result["test_hour_count"] == (3 * 24 + 1) * 2
+        assert {row["zone"] for row in result["zone_comparison"]} == {
+            "Test Bölgesi A", "Test Bölgesi B"
+        }
+        assert len(density["hourly_distribution"]) == 24
+        assert density["forecast"]["mae_seasonal"] is not None
+
+
+class TestAnalyticsDataLoading:
+    """Veri seçimi, saat tabanı ve salt okunur SQLite bağlantısını denetler."""
+
+    def create_database(self, path: Path):
+        connection = sqlite3.connect(path)
+        connection.execute(
+            "CREATE TABLE measurements (id INTEGER PRIMARY KEY, is_simulated INTEGER, "
+            "is_verified INTEGER, timestamp TEXT, zone TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO measurements VALUES (?, ?, ?, ?, ?)",
+            [
+                (1, 1, 1, "2026-11-02T08:00:00+00:00", "Test Bölgesi A"),
+                (2, 0, 1, "2026-11-02T08:00:00+00:00", "Test Bölgesi A"),
+                (3, 1, 0, "2026-11-02T09:00:00+00:00", "Test Bölgesi A"),
+            ],
+        )
+        connection.commit()
+        connection.close()
+
+    def test_filters_time_bases_and_read_only_uri(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "measurements.db"
+            self.create_database(db_path)
+            config = {"analytics": {"utc_offset_hours": 3}}
+            real_connect = sqlite3.connect
+
+            with patch("analytics.data.load_config", return_value=config):
+                with patch("analytics.data.sqlite3.connect", wraps=real_connect) as connect:
+                    all_rows, all_meta = load_measurements("all", db_path=db_path)
+                    simulated, sim_meta = load_measurements("simulated", db_path=db_path)
+                    real, real_meta = load_measurements("real", db_path=db_path)
+
+            assert connect.call_count == 3
+            assert all("mode=ro" in call.args[0] for call in connect.call_args_list)
+            assert len(all_rows) == 2  # Doğrulanmamış simüle satır varsayılan olarak dışarıda.
+            assert set(all_rows["dt"].dt.hour) == {11}
+            assert all_meta["time_basis"] == "UTC+3"
+            assert len(simulated) == 1 and simulated.iloc[0]["hour"] == 8
+            assert sim_meta["time_basis"] == "UTC"
+            assert len(real) == 1 and real.iloc[0]["hour"] == 11
+            assert real_meta["time_basis"] == "UTC+3"
+
+    def test_read_only_open_failure_does_not_retry_writable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "measurements.db"
+            self.create_database(db_path)
+            with patch("analytics.data.load_config", return_value={"analytics": {}}):
+                with patch(
+                    "analytics.data.sqlite3.connect",
+                    side_effect=sqlite3.OperationalError("read-only open failed"),
+                ) as connect:
+                    with pytest.raises(RuntimeError, match="salt okunur"):
+                        load_measurements(db_path=db_path)
+            assert connect.call_count == 1
+
 
 class TestPrivacyAndSummary:
     """Gizlilik güvencesi testleri."""
@@ -331,3 +484,51 @@ class TestPrivacyAndSummary:
         assert "AP-2" in json_str
         assert "device_hash" not in json_str
         assert '"ssid":' not in json_str
+
+
+class TestGroundTruthMatching:
+    """Ground truth saat eşleşmesinin gerçek aralıklara dayandığını denetler."""
+
+    def test_outage_uses_configured_day_and_time_offset(self):
+        scenario = {"time_window": "7. gün 14:00-15:00 UTC"}
+        first_date = datetime(2026, 11, 2).date()
+
+        utc_interval = _expected_outage_interval(scenario, first_date, 0)
+        local_interval = _expected_outage_interval(scenario, first_date, 3)
+
+        assert utc_interval == (
+            datetime(2026, 11, 8, 14), datetime(2026, 11, 8, 15)
+        )
+        assert local_interval == (
+            datetime(2026, 11, 8, 17), datetime(2026, 11, 8, 18)
+        )
+
+    def test_outage_match_requires_actual_time_overlap(self):
+        expected = {"date": "2026-11-08", "time_window": "2026-11-08 14:00-15:00"}
+        wrong_hour = {"date": "2026-11-08", "time_window": "2026-11-08 09:00-10:00"}
+        right_hour = {"date": "2026-11-08", "time_window": "2026-11-08 14:30-15:30"}
+
+        assert not _intervals_overlap(
+            _expected_outage_interval(
+                {"time_window": "7. gün 14:00-15:00 UTC"},
+                datetime(2026, 11, 2).date(),
+                0,
+            ),
+            _detection_interval(wrong_hour),
+        )
+        assert _intervals_overlap(
+            _expected_outage_interval(
+                {"time_window": "7. gün 14:00-15:00 UTC"},
+                datetime(2026, 11, 2).date(),
+                0,
+            ),
+            _detection_interval(right_hour),
+        )
+
+    def test_congestion_match_checks_expected_hours_and_offset(self):
+        scenario = {"time_window": "Hafta içi 16:00-19:00"}
+        overlapping = {"issue_type": "congestion", "time_window": "Hafta içi 19:00-21:00"}
+        unrelated = {"issue_type": "congestion", "time_window": "Hafta içi 12:00-14:00"}
+
+        assert _matches_congestion(scenario, overlapping, utc_offset=3)
+        assert not _matches_congestion(scenario, unrelated, utc_offset=3)

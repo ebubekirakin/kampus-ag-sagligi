@@ -63,6 +63,7 @@ def build_analysis_summary(
             "min_time": str(metadata.get("min_time")),
             "max_time": str(metadata.get("max_time")),
             "utc_offset_hours": metadata.get("utc_offset_hours"),
+            "time_basis": metadata.get("time_basis"),
         },
         "zone_scores": zone_scores,
         "diagnosed_issues": masked_issues,

@@ -1,154 +1,143 @@
-"""
-NetNabız İstatistiksel Anomali Tespit Modülü.
-Bölge bazında saatlik medyan gecikme (rtt_ms) ve paket kaybı (loss_pct) serilerini çıkarır;
-MAD (Median Absolute Deviation) ve Sağlam Z-Skor (Robust Z-Score) kullanarak
-beklenmedik sıçramaları ve ani kesintileri tespit eder.
-"""
+"""Saatlik ölçümlerde sağlam Z-skoru ile anomali arar."""
 
 from typing import Any
 import pandas as pd
+
 from backend.config import load_config
 
 
 def detect_anomalies(df: pd.DataFrame, config: dict | None = None) -> list[dict[str, Any]]:
-    """
-    Bölge bazında saatlik medyanlar üzerinden sağlam Z-skoru (|z| > 4.0) ile anomalileri tespit eder.
-    
-    Yöntem:
-      1. Her bölge için her gün ve saatteki gözlem medyanı hesaplanır.
-      2. Bölgenin genel saatlik medyanı taban (baseline) olarak alınır.
-      3. Medyan Mutlak Sapma (MAD) = medyan(|saatlik_medyan - taban_medyan|).
-      4. Sıfıra bölünmeyi önlemek için safe_mad = max(MAD, 1.0) kullanılır.
-      5. Sağlam Z-Skor = (gözlem_medyanı - taban_medyan) / (1.4826 * safe_mad).
-      6. Eşik üstü (|z| > 4.0) ve asgari örnek sayısını sağlayan durumlar anomali sayılır.
-      7. Aynı gün içindeki ardışık saatler tek bir aralık olarak birleştirilir.
-    """
+    """Aynı bölge, gün türü ve saat dilimini MAD tabanıyla karşılaştırır."""
     if config is None:
         config = load_config()
     cfg = config.get("analytics", {})
+    z_threshold = cfg.get("anomaly_z_threshold", 4.0)
+    min_hour_samples = cfg.get("min_hour_samples", 3)
+    mad_floor = cfg.get("anomaly_mad_floor", 0.1)
 
-    z_thresh = cfg.get("anomaly_z_threshold", 4.0)
-    min_hour_samples = cfg.get("min_hour_samples", 2)
-
-    anomalies = []
     if df.empty or "zone" not in df.columns or "dt" not in df.columns:
-        return anomalies
+        return []
 
     work_df = df.copy()
     if "day_str" not in work_df.columns:
         work_df["day_str"] = work_df["dt"].dt.strftime("%Y-%m-%d")
     if "hour" not in work_df.columns:
         work_df["hour"] = work_df["dt"].dt.hour
+    if "is_weekend" not in work_df.columns:
+        work_df["is_weekend"] = work_df["dt"].dt.day_of_week >= 5
 
-    metrics_to_check = [
-        ("rtt_ms", "Yüksek Gecikme Sıçraması", "ms"),
-        ("loss_pct", "Yüksek Paket Kaybı Sıçraması", "%"),
-    ]
+    metrics = (
+        ("rtt_ms", "Gecikme", "ms"),
+        ("loss_pct", "Paket kaybı", "%"),
+    )
+    anomalies = []
 
-    for metric_col, title_prefix, unit in metrics_to_check:
-        if metric_col not in work_df.columns:
+    for metric, label, unit in metrics:
+        if metric not in work_df.columns:
             continue
+        valid_df = work_df[work_df[metric].notna()]
 
-        valid_df = work_df[work_df[metric_col].notna()]
-        if valid_df.empty:
-            continue
-
-        for zone in valid_df["zone"].unique():
-            z_df = valid_df[valid_df["zone"] == zone]
-
-            # 1. Saatlik medyan ve örnek sayılarını hesapla
-            hourly_agg = (
-                z_df.groupby(["day_str", "hour"])[metric_col]
+        for zone, zone_df in valid_df.groupby("zone"):
+            hourly = (
+                zone_df.groupby(["day_str", "is_weekend", "hour"])[metric]
                 .agg(median="median", count="count")
                 .reset_index()
             )
 
-            if len(hourly_agg) < 5:
-                continue
+            # Taban ve MAD, aynı hafta içi/sonu ve saat dilimindeki günlerden çıkar.
+            for (is_weekend, hour), slot in hourly.groupby(["is_weekend", "hour"]):
+                for _, row in slot.iterrows():
+                    if int(row["count"]) < min_hour_samples:
+                        continue
 
-            # 2. Bölge taban medyanı ve MAD
-            base_median = float(hourly_agg["median"].median())
-            deviations = (hourly_agg["median"] - base_median).abs()
-            mad = float(deviations.median())
-            safe_mad = max(mad, 1.0)  # MAD sıfır veya çok küçük olduğunda güvenli taban
+                    # Ölçülen günü referans grubundan çıkar; olay kendi tabanını bozmasın.
+                    reference = slot[slot["day_str"] != row["day_str"]]["median"]
+                    if reference.empty:
+                        continue
+                    baseline = float(reference.median())
+                    mad = float((reference - baseline).abs().median())
+                    safe_mad = max(mad, mad_floor)
 
-            # 3. Z-Skor hesapla
-            hourly_records = []
-            for _, row in hourly_agg.iterrows():
-                obs_count = int(row["count"])
-                if obs_count < min_hour_samples:
-                    continue
+                    observed = float(row["median"])
+                    robust_z = (observed - baseline) / (1.4826 * safe_mad)
+                    if abs(robust_z) <= z_threshold:
+                        continue
 
-                obs_med = float(row["median"])
-                z_score = (obs_med - base_median) / (1.4826 * safe_mad)
-
-                if z_score > z_thresh:
-                    hourly_records.append({
+                    direction = "high" if robust_z > 0 else "low"
+                    direction_text = "yüksek" if direction == "high" else "düşük"
+                    anomalies.append({
                         "zone": zone,
                         "date": str(row["day_str"]),
-                        "hour": int(row["hour"]),
-                        "metric": metric_col,
+                        "hour": int(hour),
+                        "is_weekend": bool(is_weekend),
+                        "metric": metric,
                         "unit": unit,
-                        "title": f"{title_prefix} ({zone})",
-                        "observed_median": obs_med,
-                        "baseline_median": base_median,
-                        "robust_z": z_score,
-                        "sample_count": obs_count,
+                        "direction": direction,
+                        "title": f"Beklenenden {direction_text} {label} ({zone})",
+                        "observed_median": observed,
+                        "baseline_median": baseline,
+                        "robust_z": robust_z,
+                        "sample_count": int(row["count"]),
                     })
 
-            # 4. Ardışık saatleri birleştir
-            merged = _merge_consecutive_anomaly_hours(hourly_records)
-            anomalies.extend(merged)
-
-    return anomalies
+    return _merge_consecutive_anomaly_hours(anomalies)
 
 
 def _merge_consecutive_anomaly_hours(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Aynı gün ve bölgedeki ardışık anomali saatlerini tek bir aralıkta birleştirir."""
-    if not records:
-        return []
+    """Aynı gün, ölçüt ve yöndeki ardışık saatleri bir aralıkta birleştirir."""
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for record in records:
+        key = (
+            record["zone"],
+            record["date"],
+            record["metric"],
+            record["direction"],
+        )
+        grouped.setdefault(key, []).append(record)
 
-    by_date: dict[str, list[dict[str, Any]]] = {}
-    for r in records:
-        by_date.setdefault(r["date"], []).append(r)
-
-    merged_results = []
-    for date_str, items in by_date.items():
-        items.sort(key=lambda x: x["hour"])
+    merged = []
+    for (_, date_str, _, _), items in grouped.items():
+        items.sort(key=lambda item: item["hour"])
         clusters: list[list[dict[str, Any]]] = []
-        cur_cluster = [items[0]]
+        current = [items[0]]
 
-        for it in items[1:]:
-            if it["hour"] == cur_cluster[-1]["hour"] + 1:
-                cur_cluster.append(it)
+        for item in items[1:]:
+            if item["hour"] == current[-1]["hour"] + 1:
+                current.append(item)
             else:
-                clusters.append(cur_cluster)
-                cur_cluster = [it]
-        clusters.append(cur_cluster)
+                clusters.append(current)
+                current = [item]
+        clusters.append(current)
 
-        for cl in clusters:
-            start_h = cl[0]["hour"]
-            end_h = cl[-1]["hour"]
-            time_window = f"{date_str} {start_h:02d}:00-{end_h+1:02d}:00"
-            rep = max(cl, key=lambda x: abs(x["robust_z"]))
+        for cluster in clusters:
+            representative = max(cluster, key=lambda item: abs(item["robust_z"]))
+            start_hour = cluster[0]["hour"]
+            end_hour = cluster[-1]["hour"] + 1
+            time_window = f"{date_str} {start_hour:02d}:00-{end_hour:02d}:00"
+            metric = representative["metric"]
+            unit = representative["unit"]
+            observed = representative["observed_median"]
+            baseline = representative["baseline_median"]
+            robust_z = representative["robust_z"]
 
-            merged_results.append({
+            merged.append({
                 "issue_type": "anomaly",
-                "title": rep["title"],
-                "zone": rep["zone"],
+                "title": representative["title"],
+                "zone": representative["zone"],
                 "bssid": None,
                 "date": date_str,
                 "time_window": time_window,
-                "metric": rep["metric"],
-                "observed_median": round(rep["observed_median"], 1),
-                "baseline_median": round(rep["baseline_median"], 1),
-                "robust_z": round(rep["robust_z"], 2),
+                "metric": metric,
+                "direction": representative["direction"],
+                "observed_median": round(observed, 1),
+                "baseline_median": round(baseline, 1),
+                "robust_z": round(robust_z, 2),
+                "sample_count": sum(item["sample_count"] for item in cluster),
                 "details": (
-                    f"{time_window} saatleri arasında gözlemlenen {rep['metric']} = "
-                    f"{rep['observed_median']:.1f} {rep['unit']} "
-                    f"(taban: {rep['baseline_median']:.1f} {rep['unit']}, "
-                    f"Z-Skoru: {rep['robust_z']:.2f})"
+                    f"{time_window}: {metric} medyanı {observed:.1f} {unit}; "
+                    f"aynı gün türü/saat tabanı {baseline:.1f} {unit}; "
+                    f"sağlam Z-skoru {robust_z:.2f}"
                 ),
             })
 
-    return merged_results
+    return sorted(merged, key=lambda item: (item["date"], item["hour"] if "hour" in item else item["time_window"]))

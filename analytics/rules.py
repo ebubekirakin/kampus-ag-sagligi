@@ -295,10 +295,19 @@ def diagnose_issues(df: pd.DataFrame, config: dict | None = None) -> list[dict[s
 
                 med_ap_loss = float(ap_loss.median())
 
-                # Aynı bölgedeki diğer AP'lerin kayıpları
-                other_aps_loss = z_bssid_df[z_bssid_df["bssid"] != bssid]["loss_pct"].dropna()
-                med_other_loss = float(other_aps_loss.median()) if not other_aps_loss.empty else 0.5
-                med_other_loss = max(med_other_loss, 0.5)  # 0'a bölme veya aşırı hassasiyeti önle
+                # Kıyas tabanına yalnızca yeterli ölçümü olan diğer AP'leri al.
+                other_ap_medians = []
+                for other_bssid, other_df in z_bssid_df.groupby("bssid"):
+                    if other_bssid == bssid:
+                        continue
+                    other_loss = other_df["loss_pct"].dropna()
+                    if len(other_loss) >= min_ap_samples:
+                        other_ap_medians.append(float(other_loss.median()))
+
+                if not other_ap_medians:
+                    continue
+
+                med_other_loss = max(float(pd.Series(other_ap_medians).median()), 0.5)
 
                 if med_ap_loss >= ap_min_loss and med_ap_loss >= ap_loss_mult * med_other_loss:
                     issues.append({
