@@ -12,8 +12,8 @@ def detect_anomalies(df: pd.DataFrame, config: dict | None = None) -> list[dict[
         config = load_config()
     cfg = config.get("analytics", {})
     z_threshold = cfg.get("anomaly_z_threshold", 4.0)
-    min_hour_samples = cfg.get("min_hour_samples", 3)
-    mad_floor = cfg.get("anomaly_mad_floor", 0.1)
+    min_hour_samples = cfg.get("min_hour_samples", 2)
+    mad_floor = cfg.get("anomaly_mad_floor", 1.0)
 
     if df.empty or "zone" not in df.columns or "dt" not in df.columns:
         return []
@@ -53,7 +53,12 @@ def detect_anomalies(df: pd.DataFrame, config: dict | None = None) -> list[dict[
                     # Ölçülen günü referans grubundan çıkar; olay kendi tabanını bozmasın.
                     reference = slot[slot["day_str"] != row["day_str"]]["median"]
                     if reference.empty:
-                        continue
+                        # Eğer aynı (is_weekend, hour) diliminde başka referans günü yoksa,
+                        # bölgenin genel saatlik medyan serisine geri düş (fallback).
+                        zone_reference = hourly[hourly["day_str"] != row["day_str"]]["median"]
+                        if zone_reference.empty:
+                            continue
+                        reference = zone_reference
                     baseline = float(reference.median())
                     mad = float((reference - baseline).abs().median())
                     safe_mad = max(mad, mad_floor)

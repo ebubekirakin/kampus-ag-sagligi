@@ -231,7 +231,7 @@ def _is_explained_by_scenario(
         return detection.get("metric") == "rtt_ms" and detection.get("direction") == "high" and _intervals_overlap(expected, interval)
 
     if scenario.get("scenario_id") == "faulty_ap":
-        return detection.get("metric") == "loss_pct" and detection.get("direction") == "high"
+        return detection.get("zone") == scenario.get("zone") and detection.get("direction") == "high"
 
     if scenario.get("scenario_id") == "sudden_outage":
         expected = _expected_outage_interval(scenario, first_date, utc_offset)

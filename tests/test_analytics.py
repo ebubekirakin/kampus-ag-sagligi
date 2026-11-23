@@ -67,9 +67,9 @@ def mock_analytics_config():
             "ap_min_loss_pct": 8.0,
             "ap_loss_multiplier": 2.0,
             "min_ap_samples": 10,
-            "min_hour_samples": 3,
+            "min_hour_samples": 2,
             "anomaly_z_threshold": 4.0,
-            "anomaly_mad_floor": 0.1,
+            "anomaly_mad_floor": 1.0,
             "forecast_test_days": 3,
         },
     }
