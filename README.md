@@ -85,3 +85,27 @@ python -m analytics.evaluate
 ```
 
 `--data real` gerçek ölçümleri, `--data all` ise iki veri türünü açıkça birlikte seçer. Varsayılan analiz yalnızca `is_verified=1` kayıtlarını alır; `--include-unverified` bu filtreyi kaldırır. Simüle zamanlar UTC, gerçek ve `all` analizindeki zamanlar `config.toml` içindeki `analytics.utc_offset_hours` kadar kaydırılır. Katılım grafiği ve tahmini ağ trafiğini değil, kullanıcıların ölçüm gönderme sayısını gösterir; raporlar `data/analysis_summary.json` ve `data/evaluation_result.md` dosyalarına yazılır.
+
+## Paneli (Dashboard) çalıştırma
+
+Streamlit panelini başlatmak için:
+
+```powershell
+streamlit run dashboard/app.py
+```
+
+Tarayıcınızda otomatik olarak `http://127.0.0.1:8501` adresi açılacaktır.
+
+### Beklenen Ekran ve Özellikler:
+- **Üst Uyarı Bandı:** Simüle veya karışık veri kullanımında sayfanın en üstünde turuncu uyarı bandı görüntülenir.
+- **Kenar Çubuğu (Sidebar):** Veri türü seçimi (`simulated`, `real`, `all`) ve Görünüm seçimi (`Öğrenci`, `Yönetici`).
+- **Öğrenci Görünümü:**
+  - *Hedef Nokta:* Seçilen gün ve saate göre en düşük gecikmeli, yeterli veriye sahip ideal çalışma noktasını önerir.
+  - *Kampüs Kartları:* Bina ve kat bazında gruplanmış, renk körlüğü uyumlu (İyi/Orta/Zayıf etiketli) renkli sağlık kartları.
+  - *Saatlik Çizgi Grafiği:* Seçilen bölge için hafta içi ve hafta sonu saatlik gecikme trendleri.
+- **Yönetici Görünümü:**
+  - *Genel Bakış:* Toplam ölçüm, doğrulama oranı, simüle/gerçek dağılımı ve detaylı bölge sağlık skor tablosu.
+  - *Sorunlar:* Kural tabanlı kronik teşhisler ve MAD robust Z-skor anomalileri (AP adresleri `AP-1, AP-2` olarak maskeli).
+  - *Trendler:* Bölge bazlı günlük/saatlik metrik çizgileri ve Saat × Gün medyan gecikme matrisi.
+  - *Tahmin:* Mevsimsel MAE ile tekil medyan taban MAE karşılaştırması ve mevsimselliğin yetersiz kaldığı bölgelerin analizi.
+  - *Veri ve Gizlilik:* Toplanan/toplanmayan verilerin dökümü, analiz veri aralığı ve ileride eklenecek yerel yapay zeka için gizlilik güvencesi bildirimi.
