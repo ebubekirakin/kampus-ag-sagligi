@@ -53,12 +53,14 @@ def detect_anomalies(df: pd.DataFrame, config: dict | None = None) -> list[dict[
                     # Ölçülen günü referans grubundan çıkar; olay kendi tabanını bozmasın.
                     reference = slot[slot["day_str"] != row["day_str"]]["median"]
                     if reference.empty:
-                        # Eğer aynı (is_weekend, hour) diliminde başka referans günü yoksa,
-                        # bölgenin genel saatlik medyan serisine geri düş (fallback).
-                        zone_reference = hourly[hourly["day_str"] != row["day_str"]]["median"]
-                        if zone_reference.empty:
+                        # Gün türünde örnek yoksa aynı bölge ve saatin diğer günlerini kullan.
+                        reference = hourly.loc[
+                            (hourly["hour"] == hour)
+                            & (hourly["day_str"] != row["day_str"]),
+                            "median",
+                        ]
+                        if reference.empty:
                             continue
-                        reference = zone_reference
                     baseline = float(reference.median())
                     mad = float((reference - baseline).abs().median())
                     safe_mad = max(mad, mad_floor)

@@ -266,6 +266,41 @@ class TestAnomalyDetection:
         anomalies = detect_anomalies(pd.DataFrame(records), mock_analytics_config)
         assert anomalies == []
 
+    def test_sparse_weekend_falls_back_to_same_hour_only(self, mock_analytics_config):
+        """Seyrek hafta sonu saati, diğer saatlerle değil aynı saatle kıyaslanmalıdır."""
+        start = datetime(2026, 11, 2, 12, 0, tzinfo=timezone.utc)
+        records = []
+        for day in range(4):
+            date = start + timedelta(days=day)
+            # Saat 13:00 değerleri fallback'in yanlış saate bakmadığını da sınar.
+            for hour, value in ((12, 50.0), (13, 200.0)):
+                for sample in range(3):
+                    records.append({
+                        "zone": "Test Bölgesi A",
+                        "rtt_ms": value,
+                        "loss_pct": 0.5,
+                        "dt": date.replace(hour=hour) + timedelta(minutes=sample * 10),
+                    })
+
+        weekend = start + timedelta(days=5)
+        for sample in range(3):
+            records.append({
+                "zone": "Test Bölgesi A",
+                "rtt_ms": 600.0,
+                "loss_pct": 0.5,
+                "dt": weekend + timedelta(minutes=sample * 10),
+            })
+
+        anomalies = detect_anomalies(pd.DataFrame(records), mock_analytics_config)
+        outage = next(
+            item for item in anomalies
+            if item["date"] == "2026-11-07"
+            and item["metric"] == "rtt_ms"
+            and "12:00-13:00" in item["time_window"]
+        )
+        assert outage["baseline_median"] == 50.0
+        assert outage["robust_z"] > 4.0
+
     def test_negative_robust_z_score_is_anomaly(self, mock_analytics_config):
         """Beklenenden çok düşük ölçüm de mutlak Z-skor eşiğiyle yakalanır."""
         start = datetime(2026, 11, 2, 14, 0, tzinfo=timezone.utc)
