@@ -33,3 +33,7 @@
 - `is_verified`: 1 (doğrulanmış kampüs ölçümü) veya 0
 - `is_simulated`: 1 (simüle ölçüm) veya 0 (gerçek ölçüm)
 - `timestamp`: ISO formatında ölçüm zamanı
+
+## Tasarım kuralı
+Panele yeni sayfa/sekme eklerken `docs/TASARIM_REHBERI.md`'ye ve
+`dashboard/theme.py` bileşenlerine uy; kendi CSS'ini yazma.

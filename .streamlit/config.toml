@@ -3,3 +3,11 @@ gatherUsageStats = false
 
 [server]
 address = "127.0.0.1"
+
+[theme]
+base = "dark"
+primaryColor = "#2dd4bf"
+backgroundColor = "#0b1220"
+secondaryBackgroundColor = "#131c31"
+textColor = "#e6edf7"
+font = "sans serif"

@@ -34,7 +34,7 @@ class TestScoreBadge:
 
     def test_ideal_score(self, mock_config):
         color, label, hex_code = get_score_badge(100.0, mock_config)
-        assert color == "yeşil" and label == "İyi" and hex_code == "#28a745"
+        assert color == "yeşil" and label == "İyi" and hex_code == "#22c55e"
 
     def test_boundary_green_threshold(self, mock_config):
         color, label, _ = get_score_badge(75.0, mock_config)
@@ -60,7 +60,7 @@ class TestScoreBadge:
         color, label, hex_code = get_score_badge(None, mock_config)
         assert color == "gri"
         assert label == "Yetersiz veri"
-        assert hex_code == "#6c757d"
+        assert hex_code == "#64748b"
 
 
 class TestZoneHierarchy:

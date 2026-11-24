@@ -28,12 +28,12 @@ def get_score_badge(score: float | None, config: dict | None = None) -> tuple[st
     score_yellow = cfg.get("score_yellow", 50.0)
 
     if score is None:
-        return "gri", "Yetersiz veri", "#6c757d"
+        return "gri", "Yetersiz veri", "#64748b"
     if score >= score_green:
-        return "yeşil", "İyi", "#28a745"
+        return "yeşil", "İyi", "#22c55e"
     if score >= score_yellow:
-        return "sarı", "Orta", "#ffc107"
-    return "kırmızı", "Zayıf", "#dc3545"
+        return "sarı", "Orta", "#f59e0b"
+    return "kırmızı", "Zayıf", "#ef4444"
 
 
 def parse_building_floor_zone(zone_name: str) -> tuple[str, str, str]:

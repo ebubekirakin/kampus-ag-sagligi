@@ -1,31 +1,36 @@
-"""
-NetNabız - Kampüs Wi-Fi Sağlığı ve Sorun Analiz Paneli (Streamlit).
-Öğrenci ve Yönetici görünümleriyle kampüs ağ sağlığını, kural tabanlı teşhisleri,
-MAD anomalilerini ve mevsimsel tahmin sonuçlarını sunar.
-Tamamen yerel çalışır, harici grafik kütüphanesi ve ücretli servis kullanmaz.
-"""
+"""NetNabız Streamlit paneli; hesaplamaları analytics modüllerinden alır."""
 
-import streamlit as st
+import sys
+from html import escape
+from pathlib import Path
+from statistics import median
+
+# Proje kök dizinini Python yoluna ekle (dosya doğrudan Streamlit ile açılır).
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import pandas as pd
+import streamlit as st
 
-from backend.config import load_config
-from analytics.data import load_measurements
-from analytics.rules import calculate_zone_scores, diagnose_issues
 from analytics.anomaly import detect_anomalies
-from analytics.forecast import evaluate_forecast, compute_participation_density
+from analytics.data import load_measurements
+from analytics.forecast import compute_participation_density, evaluate_forecast
+from analytics.rules import calculate_zone_scores, diagnose_issues
+from backend.config import load_config
+from dashboard import theme
 from dashboard.helpers import (
-    get_score_badge,
-    group_zones_by_hierarchy,
+    build_hourly_day_matrix,
     find_best_spot,
     find_underperforming_forecast_zones,
-    build_hourly_day_matrix,
-    prepare_masked_issues_and_anomalies,
     get_record_counts,
+    get_score_badge,
+    prepare_masked_issues_and_anomalies,
 )
 
-# Sayfa Temel Ayarları
+
 st.set_page_config(
-    page_title="NetNabız - Kampüs Ağ Sağlığı",
+    page_title="NetNabız · Kampüs Wi-Fi Sağlığı",
     page_icon="📡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -34,13 +39,9 @@ st.set_page_config(
 
 @st.cache_data
 def get_cached_analytics(data_type: str):
-    """
-    Ölçüm verilerini ve analiz boru hattını çalıştırıp önbelleğe alır.
-    API sunucusundan bağımsız, doğrudan salt okunur SQLite üzerinden çalışır.
-    """
+    """Analizi salt okunur SQLite verisinden bir kez hesaplayıp önbelleğe alır."""
     df, meta = load_measurements(data_type=data_type, verified_only=True)
     config = load_config()
-
     if df.empty:
         return df, meta, config, [], [], [], {}, {}
 
@@ -49,395 +50,271 @@ def get_cached_analytics(data_type: str):
     raw_anomalies = detect_anomalies(df, config)
     forecast = evaluate_forecast(df, config)
     participation = compute_participation_density(df)
-
-    all_bssids = df["bssid"].dropna().unique().tolist() if "bssid" in df.columns else []
-    issues, anomalies = prepare_masked_issues_and_anomalies(raw_issues, raw_anomalies, all_bssids)
-
+    bssids = df["bssid"].dropna().unique().tolist() if "bssid" in df.columns else []
+    issues, anomalies = prepare_masked_issues_and_anomalies(raw_issues, raw_anomalies, bssids)
     return df, meta, config, scores, issues, anomalies, forecast, participation
 
 
-# -------------------------------------------------------------
-# KENAR ÇUBUĞU (SIDEBAR)
-# -------------------------------------------------------------
-st.sidebar.title("📡 NetNabız Kontrol")
+def _render(markup: str) -> None:
+    """Theme bileşenlerini Streamlit HTML alanında gösterir."""
+    st.markdown(markup, unsafe_allow_html=True)
+
+
+def _campus_score(scores: list[dict]) -> float | None:
+    """Hesaplanmış bölge skorlarının medyanını genel kampüs skoru yapar."""
+    values = [item["score"] for item in scores if item.get("score") is not None]
+    return round(float(median(values)), 1) if values else None
+
+
+def _insights(scores: list[dict], issues: list[dict], participation: dict, config: dict) -> list[str]:
+    """Üst şerit cümlelerini yalnızca mevcut analiz sonuçlarından hazırlar."""
+    lines = []
+    scored = [item for item in scores if item.get("score") is not None]
+    if scored:
+        best = max(scored, key=lambda item: item["score"])
+        lines.append(f"En iyi skor: {best['zone']} ({best['score']:.1f})")
+        weak = [item for item in scored if get_score_badge(item["score"], config)[0] == "kırmızı"]
+        if weak:
+            lines.append(f"Dikkat: {weak[0]['zone']} bölgesi zayıf durumda.")
+    peak = participation.get("peak_hour")
+    if peak:
+        lines.append(f"En yoğun katılım saati: {peak} (ölçüm katılımı)")
+    if issues:
+        lines.append(f"İncelenmesi gereken {len(issues)} kural tabanlı bulgu var.")
+    return lines
+
+
+def _score_table_style(row: pd.Series, config: dict) -> list[str]:
+    """Skor tablosunda metin etiketinin yanında durum rengini de kullanır."""
+    result = get_score_badge(row.get("_score"), config)
+    color = result[2]
+    return [f"color: {color}; font-weight: 700" if column == "Durum" else "" for column in row.index]
+
+
+def _matrix_style(matrix: pd.DataFrame) -> pd.DataFrame:
+    """Matris hücrelerini paletin CSS değişkenleriyle hafifçe renklendirir."""
+    numeric = matrix.stack().dropna()
+    low = float(numeric.min()) if not numeric.empty else 0.0
+    span = float(numeric.max() - low) if not numeric.empty else 0.0
+
+    def style_value(value):
+        if pd.isna(value):
+            return "color: var(--muted); background: var(--surface)"
+        intensity = 35 if span == 0 else int(12 + 35 * (float(value) - low) / span)
+        return f"color: var(--text); background: color-mix(in srgb, var(--secondary) {intensity}%, var(--surface))"
+
+    return matrix.style.map(style_value)
+
+
+def _chart(data: pd.Series | pd.DataFrame, color: str | list[str]) -> None:
+    """Streamlit'in yerleşik çizgi grafiğini tema renkleriyle çizer."""
+    st.line_chart(data, color=color, height=260)
+
+
+_render(theme.inject_css())
+st.sidebar.title("📡 NetNabız")
 data_type = st.sidebar.selectbox(
-    "Veri Türü",
+    "Veri türü",
     options=["simulated", "real", "all"],
-    index=0,
-    format_func=lambda x: {
-        "simulated": "Simüle Veri (simulated)",
-        "real": "Gerçek Ölçümler (real)",
-        "all": "Tüm Kayıtlar (all)",
-    }.get(x, x),
+    format_func=lambda value: {
+        "simulated": "Simüle veri",
+        "real": "Gerçek ölçüm",
+        "all": "Tüm kayıtlar",
+    }[value],
 )
+view_mode = st.sidebar.radio("Görünüm", ["Öğrenci", "Yönetici"])
 
-view_mode = st.sidebar.radio(
-    "Görünüm Seçimi",
-    options=["Öğrenci", "Yönetici"],
-    index=0,
-    help="Öğrenciler için en iyi çalışma noktaları ve genel sağlık; yöneticiler için detaylı teşhis ve tahminler.",
-)
-
-st.sidebar.markdown("---")
-
-# Öğrenci görünümü için gün tipi ve saat seçimi
 is_weekend = False
 selected_hour = 14
 if view_mode == "Öğrenci":
-    st.sidebar.subheader("🕒 Zaman Simülatörü")
-    st.sidebar.caption("Simüle veriler sabit tarihli olduğundan çalışma zamanınızı seçebilirsiniz:")
-    day_type = st.sidebar.selectbox("Gün Tipi", ["Hafta içi", "Hafta sonu"], index=0)
-    is_weekend = (day_type == "Hafta sonu")
-    selected_hour = st.sidebar.slider("Saat", min_value=0, max_value=23, value=14, step=1, format="%d:00")
+    st.sidebar.markdown("#### Zaman seçimi")
+    st.sidebar.caption("Simüle verinin sabit tarihlerini kullanarak öneriyi inceleyin.")
+    is_weekend = st.sidebar.selectbox("Gün türü", ["Hafta içi", "Hafta sonu"]) == "Hafta sonu"
+    selected_hour = st.sidebar.slider("Saat", 0, 23, 14, format="%d:00")
 
-# -------------------------------------------------------------
-# VERİ YÜKLEME VE KONTROL
-# -------------------------------------------------------------
 try:
     df, meta, config, scores, issues, anomalies, forecast, participation = get_cached_analytics(data_type)
-except Exception as e:
-    st.error(f"Veri yüklenirken bir hata oluştu: {e}")
+except Exception as error:
+    st.error(f"Veri yüklenemedi: {error}")
     st.stop()
 
-# Simüle Veri Uyarı Bandı
-if data_type in ("simulated", "all"):
-    st.warning("⚠️ Bu panel **SİMÜLE** veriyle çalışmaktadır. Değerler sentetik kampüs modeline dayanır.")
+campus_score = _campus_score(scores)
+_render(theme.hero(
+    "Kampüs Wi-Fi Sağlık Rehberi" if view_mode == "Öğrenci" else "Ağ Yönetim Paneli",
+    "Bağlantı sağlığını anlayın, doğru çalışma alanını bulun." if view_mode == "Öğrenci" else "Kampüs ağındaki eğilimleri ve sorunları izleyin.",
+    data_type,
+    campus_score,
+    config,
+))
+_render(theme.insight_ribbon(_insights(scores, issues, participation, config)))
 
-# Boş Veri Durumu
 if df.empty:
-    st.info(f"Seçilen veri türünde ('{data_type}') henüz kayıtlı ölçüm bulunmuyor. İstemci ile ölçüm gönderdikten sonra yenileyebilirsiniz.")
+    _render(theme.note_box(
+        f"Seçilen veri türünde ({data_type}) henüz kayıtlı ölçüm bulunmuyor.", "warning"
+    ))
     st.stop()
 
 
-# -------------------------------------------------------------
-# GÖRÜNÜM 1: ÖĞRENCİ GÖRÜNÜMÜ
-# -------------------------------------------------------------
 if view_mode == "Öğrenci":
-    st.title("🎓 Kampüs Wi-Fi Sağlık Rehberi")
-    st.markdown("Ders çalışmak, araştırma yapmak ve kampüste en verimli bağlantıyı bulmak için anlık ağ durumu.")
-
-    # A) Şu an en iyi nokta
-    st.subheader("🎯 Seçilen Saatte En İyi Çalışma Noktası")
+    _render(theme.section_title("Şu an önerilen nokta", "Seçtiğiniz zaman için mevsimsel gecikme tahmini"))
     best_spot = find_best_spot(df, is_weekend, selected_hour, scores)
-
     if best_spot:
-        col_rec1, col_rec2, col_rec3 = st.columns([2, 1, 1])
-        with col_rec1:
-            st.success(f"**Önerilen Bölge:** {best_spot['zone']}")
-            st.caption(f"{'Hafta sonu' if is_weekend else 'Hafta içi'} saat {selected_hour:02d}:00 için en düşük tahmini gecikme.")
-        with col_rec2:
-            st.metric(
-                label="Ağ Sağlık Skoru",
-                value=f"{best_spot['score']:.1f} / 100",
-                delta=f"{best_spot['status'].capitalize()} ({best_spot['color']})",
-            )
-        with col_rec3:
-            st.metric(
-                label="Tahmini Gecikme",
-                value=f"{best_spot['estimated_rtt_ms']:.1f} ms",
-                delta="Hızlı" if best_spot['estimated_rtt_ms'] < 40 else "Normal",
-                delta_color="normal",
-            )
+        period = "Hafta sonu" if is_weekend else "Hafta içi"
+        _render(theme.best_spot_card(
+            best_spot["zone"], best_spot["score"], best_spot["estimated_rtt_ms"],
+            f"{period} saat {selected_hour:02d}:00 diliminde en düşük tahmini gecikmeye sahip bölge.", config,
+        ))
     else:
-        st.info("Bu saat dilimi için yeterli veriye sahip önerilebilir bir bölge bulunamadı.")
+        _render(theme.note_box("Bu zaman diliminde önerilebilecek yeterli veriye sahip bölge yok.", "warning"))
 
-    st.markdown("---")
-
-    # B) Kampüs Kartları (Bina -> Kat -> Bölge)
-    st.subheader("🏢 Kampüs Wi-Fi Sağlık Kartları")
-    st.caption("Bina ve katlara göre güncel sağlık skorları:")
-
-    hierarchy = group_zones_by_hierarchy(scores)
-
-    for building, floors in hierarchy.items():
-        with st.expander(f"🏛️ {building}", expanded=True):
-            for floor, zone_items in floors.items():
-                st.markdown(f"**📍 {floor}**")
-                cols = st.columns(min(len(zone_items), 3))
-                for idx, z_item in enumerate(zone_items):
-                    col = cols[idx % len(cols)]
-                    with col:
-                        score_val = z_item.get("score")
-                        color_name, label_text, hex_code = get_score_badge(score_val, config)
-
-                        rtt_str = f"{z_item['median_rtt_ms']:.1f} ms" if z_item.get("median_rtt_ms") is not None else "-"
-                        down_str = f"{z_item['median_down_mbps']:.1f} Mbps" if z_item.get("median_down_mbps") is not None else "-"
-                        score_str = f"{score_val:.1f}" if score_val is not None else "-"
-
-                        # Renk körlüğü için belirgin etiketli kart
-                        st.markdown(
-                            f"""
-                            <div style="
-                                border-left: 6px solid {hex_code};
-                                padding: 12px 14px;
-                                border-radius: 8px;
-                                background-color: rgba(128, 128, 128, 0.08);
-                                margin-bottom: 12px;
-                            ">
-                                <h4 style="margin: 0 0 6px 0; font-size: 15px;">{z_item['zone']}</h4>
-                                <div style="font-size: 13px; font-weight: bold; color: {hex_code}; margin-bottom: 6px;">
-                                    Skor: {score_str} — {label_text} ({color_name.upper()})
-                                </div>
-                                <div style="font-size: 12px; color: #aaa;">
-                                    ⚡ Gecikme: <b>{rtt_str}</b> &nbsp;|&nbsp; 📥 Hız: <b>{down_str}</b><br>
-                                    📊 Örnek: {z_item['sample_count']} ölçüm
-                                </div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-
-    st.markdown("---")
-
-    # C) Seçilen bölge için saatlik gecikme çizgisi
-    st.subheader("📈 Bölge Saatlik Gecikme Karşılaştırması")
-    zone_names = [s["zone"] for s in scores if s.get("score") is not None]
-    if zone_names:
-        selected_zone_student = st.selectbox("Grafiğini incelemek istediğiniz bölgeyi seçin:", zone_names, index=0)
-
-        z_df = df[df["zone"] == selected_zone_student].copy()
-        if not z_df.empty and "rtt_ms" in z_df.columns:
-            weekday_series = z_df[~z_df["is_weekend"]].groupby("hour")["rtt_ms"].mean()
-            weekend_series = z_df[z_df["is_weekend"]].groupby("hour")["rtt_ms"].mean()
-
-            chart_data = pd.DataFrame(index=[f"{h:02d}:00" for h in range(24)])
-            chart_data["Hafta içi Gecikme (ms)"] = [weekday_series.get(h) for h in range(24)]
-            chart_data["Hafta sonu Gecikme (ms)"] = [weekend_series.get(h) for h in range(24)]
-
-            st.line_chart(chart_data)
-            st.caption(f"*{selected_zone_student}* için hafta içi ve hafta sonu saatlik ortalama gecikme (ms).")
-
-
-# -------------------------------------------------------------
-# GÖRÜNÜM 2: YÖNETİCİ GÖRÜNÜMÜ
-# -------------------------------------------------------------
-else:
-    st.title("🛠️ Ağ Yönetim ve Sağlık Analiz Paneli")
-    st.markdown("Kampüs Wi-Fi ağ altyapısının genel sağlık metrikleri, kural tabanlı sorun teşhisleri ve istatistiksel anomaliler.")
-
-    tab_overview, tab_issues, tab_trends, tab_forecast, tab_privacy = st.tabs([
-        "📊 Genel Bakış",
-        "⚠️ Sorunlar",
-        "📈 Trendler",
-        "🔮 Tahmin",
-        "🔒 Veri ve Gizlilik",
-    ])
-
-    # 1. SEKME: GENEL BAKIŞ
-    with tab_overview:
-        st.subheader("Kampüs Ağ Sağlığı Özeti")
-        record_counts = get_record_counts(data_type)
-        total_records = record_counts["total"]
-        verified_count = record_counts["verified"]
-        unverified_count = record_counts["unverified"]
-        verified_ratio = (verified_count / total_records * 100) if total_records > 0 else 0.0
-        unverified_ratio = (unverified_count / total_records * 100) if total_records > 0 else 0.0
-        sim_count = record_counts["simulated"]
-        real_count = record_counts["real"]
-
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Toplam Ölçüm", f"{total_records:,}")
-        c2.metric("Doğrulanmış", f"%{verified_ratio:.1f}", f"{verified_count:,} adet")
-        c3.metric("Doğrulanmamış", f"%{unverified_ratio:.1f}", f"{unverified_count:,} adet")
-        c4.metric("Simüle / Gerçek", f"{sim_count:,} / {real_count:,}")
-        c5.metric("İzlenen Bölge", len(scores))
-
-        st.markdown("### Bölge Sağlık Skorları Tablosu")
-        table_rows = []
-        for s in scores:
-            score_val = s.get("score")
-            color_name, label_text, _ = get_score_badge(score_val, config)
-            table_rows.append({
-                "Bölge": s["zone"],
-                "Skor": f"{score_val:.1f}" if score_val is not None else "-",
-                "Durum": f"{label_text} ({color_name.upper()})",
-                "Medyan RTT (ms)": s.get("median_rtt_ms"),
-                "%90 RTT (ms)": s.get("p90_rtt_ms"),
-                "Kayıp (%)": s.get("median_loss_pct"),
-                "İndirme (Mbps)": s.get("median_down_mbps"),
-                "Sinyal (dBm)": s.get("median_signal_dbm"),
-                "Örnek": s.get("sample_count", 0),
-            })
-        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
-
-    # 2. SEKME: SORUNLAR
-    with tab_issues:
-        st.subheader("Tespit Edilen Ağ Sorunları ve Anomaliler")
-        st.caption("Veriye dayalı istatistiksel kurallar ve sağlam Z-skoru ile tespit edilmiş kronik sorunlar ve ani sıçramalar.")
-
-        st.markdown("#### 1. Kural Tabanlı Kronik Teşhisler")
-        if issues:
-            for idx, iss in enumerate(issues, start=1):
-                with st.container():
-                    st.markdown(f"**{idx}. [{iss['title'].upper()}] — {iss['zone']}**")
-                    st.markdown(f"- **Zaman Penceresi:** `{iss['time_window']}`")
-                    if iss.get("bssid"):
-                        st.markdown(f"- **İlgili Erişim Noktası:** `{iss['bssid']}` *(Gizlilik için takma ad kullanılmıştır)*")
-                    st.markdown(f"- **Sayısal Kanıt:** {iss['details']}")
-                    st.markdown("---")
-        else:
-            st.success("Aktif kural ihlali veya kronik arıza tespit edilmedi.")
-
-        st.markdown("#### 2. İstatistiksel Anomaliler (MAD Robust Z-Skor > 4.0)")
-        if anomalies:
-            anom_rows = []
-            for a in anomalies:
-                anom_rows.append({
-                    "Zaman Aralığı": a.get("time_window"),
-                    "Bölge": a.get("zone"),
-                    "Ölçüt": a.get("metric"),
-                    "Yön": "Yüksek" if a.get("direction") == "high" else "Düşük",
-                    "Gözlem": a.get("observed_median"),
-                    "Taban Değer": a.get("baseline_median"),
-                    "Sağlam Z-Skor": a.get("robust_z"),
-                    "Örnek": a.get("sample_count", 0),
-                })
-            st.dataframe(pd.DataFrame(anom_rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("Eşik değerini (|z| > 4.0) aşan istatistiksel anomali bulunamadı.")
-
-    # 3. SEKME: TRENDLER
-    with tab_trends:
-        st.subheader("Bölge Bazlı Zaman Serisi ve Yoğunluk Trendleri")
-        all_zone_list = sorted(list(df["zone"].dropna().unique()))
-        selected_zone_admin = st.selectbox("Detaylı trend analizi için bölge seçin:", all_zone_list, key="admin_zone")
-
-        z_admin_df = df[df["zone"] == selected_zone_admin].copy()
-
-        if not z_admin_df.empty:
-            col_t1, col_t2 = st.columns(2)
-            with col_t1:
-                st.markdown("**Günlük Medyan Gecikme (ms)**")
-                daily_rtt = z_admin_df.groupby("day_str")["rtt_ms"].median()
-                st.line_chart(daily_rtt)
-
-            with col_t2:
-                st.markdown("**Saatlik Medyan Gecikme (ms)**")
-                hourly_rtt = z_admin_df.groupby("hour")["rtt_ms"].median()
-                st.line_chart(hourly_rtt)
-
-            col_t3, col_t4 = st.columns(2)
-            with col_t3:
-                st.markdown("**Günlük Paket Kaybı (%)**")
-                daily_loss = z_admin_df.groupby("day_str")["loss_pct"].median()
-                st.line_chart(daily_loss)
-
-            with col_t4:
-                st.markdown("**Günlük İndirme Hızı (Mbps)**")
-                daily_down = z_admin_df.groupby("day_str")["down_mbps"].median()
-                st.line_chart(daily_down)
-
-            col_t5, col_t6 = st.columns(2)
-            with col_t5:
-                st.markdown("**Saatlik Medyan Paket Kaybı (%)**")
-                hourly_loss = z_admin_df.groupby("hour")["loss_pct"].median()
-                st.line_chart(hourly_loss)
-
-            with col_t6:
-                st.markdown("**Saatlik Medyan İndirme Hızı (Mbps)**")
-                hourly_down = z_admin_df.groupby("hour")["down_mbps"].median()
-                st.line_chart(hourly_down)
-
-            st.markdown("#### Saat × Hafta Günü Ortalama Gecikme Matrisi (ms)")
-            matrix_df = build_hourly_day_matrix(df, selected_zone_admin)
-            styled_matrix = matrix_df.style.background_gradient(cmap="YlOrRd", axis=None)
-            st.dataframe(styled_matrix, use_container_width=True)
-            st.caption(f"*{selected_zone_admin}* için gün ve saatlere göre ortalama gecikme dağılımı.")
-
-    # 4. SEKME: TAHMİN
-    with tab_forecast:
-        st.subheader("Mevsimsel Tahmin ve Model Performans Kıyaslaması")
-        st.markdown(
-            "Son 3 gün test kümesi olarak ayrılmış; eğitim kümesindeki mevsimsel medyanlar "
-            "`(bölge, hafta içi/sonu, saat)` ile tekil bölge medyanı taban çizgisi (baseline) "
-            "Ortalama Mutlak Hata (MAE) metriğiyle sınanmıştır."
+    _render(theme.section_title("Kampüs planı", "Bina ve katlardaki bağlantı durumları"))
+    _render(theme.campus_map(scores, config))
+    _render(theme.section_title("Bölge kartları", "Renklerin yanında durum etiketleri de gösterilir."))
+    cards = "".join(
+        theme.zone_card(
+            item["zone"], item.get("score"), item.get("median_rtt_ms"),
+            item.get("median_down_mbps"), item.get("sample_count", 0), config,
         )
+        for item in scores
+    )
+    _render(f'<div class="np-grid">{cards}</div>')
 
+    _render(theme.section_title("Saatlik gecikme", "Seçilen bölge için hafta içi/hafta sonu karşılaştırması"))
+    zone_names = [item["zone"] for item in scores if item.get("score") is not None]
+    if zone_names:
+        selected_zone = st.selectbox("Bölge seçin", zone_names)
+        zone_df = df[df["zone"] == selected_zone]
+        weekday = zone_df[~zone_df["is_weekend"]].groupby("hour")["rtt_ms"].mean()
+        weekend = zone_df[zone_df["is_weekend"]].groupby("hour")["rtt_ms"].mean()
+        chart = pd.DataFrame(index=[f"{hour:02d}:00" for hour in range(24)])
+        chart["Hafta içi"] = [weekday.get(hour) for hour in range(24)]
+        chart["Hafta sonu"] = [weekend.get(hour) for hour in range(24)]
+        _chart(chart, [theme.PALETTE["primary"], theme.PALETTE["secondary"]])
+        st.caption(f"{escape(selected_zone)} için saatlik ortalama gecikme (ms).")
+
+else:
+    tabs = st.tabs(["Genel bakış", "Sorunlar", "Trendler", "Tahmin", "Veri ve gizlilik"])
+    tab_overview, tab_issues, tab_trends, tab_forecast, tab_privacy = tabs
+
+    with tab_overview:
+        _render(theme.section_title("Kampüsün genel durumu", "Seçilen veri türündeki kayıtların kısa özeti"))
+        counts = get_record_counts(data_type)
+        total = counts["total"]
+        verified_pct = counts["verified"] / total * 100 if total else 0
+        unverified_pct = counts["unverified"] / total * 100 if total else 0
+        kpis = [
+            theme.kpi_card("Toplam ölçüm", f"{total:,}", "Seçilen veri türü"),
+            theme.kpi_card("Doğrulanmış", f"%{verified_pct:.1f}", f"{counts['verified']:,} kayıt"),
+            theme.kpi_card("Doğrulanmamış", f"%{unverified_pct:.1f}", f"{counts['unverified']:,} kayıt"),
+            theme.kpi_card("Simüle / gerçek", f"{counts['simulated']:,} / {counts['real']:,}", "Kayıt sayısı"),
+            theme.kpi_card("İzlenen bölge", len(scores), "Yapılandırılmış kampüs alanları"),
+        ]
+        _render(f'<div class="np-grid">{"".join(kpis)}</div>')
+        _render(theme.section_title("Bölge sağlık skorları", "Skorlar analiz modülünün eşiklerini kullanır."))
+        rows = []
+        for item in scores:
+            _, label, _ = get_score_badge(item.get("score"), config)
+            if item.get("score") is None:
+                label = "Veri yok"
+            rows.append({
+                "Bölge": item["zone"], "_score": item.get("score"),
+                "Skor": item.get("score"), "Durum": label,
+                "Medyan RTT (ms)": item.get("median_rtt_ms"),
+                "%90 RTT (ms)": item.get("p90_rtt_ms"),
+                "Kayıp (%)": item.get("median_loss_pct"),
+                "İndirme (Mbps)": item.get("median_down_mbps"),
+                "Sinyal (dBm)": item.get("median_signal_dbm"),
+                "Örnek": item.get("sample_count", 0),
+            })
+        table = pd.DataFrame(rows)
+        if not table.empty:
+            styled = table.style.apply(lambda row: _score_table_style(row, config), axis=1).hide(
+                subset=["_score"], axis="columns"
+            )
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    with tab_issues:
+        _render(theme.section_title("Tespit edilen bulgular", "AP adresleri arayüzde yalnızca takma adlarıyla gösterilir."))
+        if not issues and not anomalies:
+            _render(theme.note_box("Bu veri aralığında gösterilecek bulgu yok.", "success"))
+        for issue in issues:
+            _render(theme.issue_card(
+                issue.get("title", "Ağ bulgusu"), issue.get("zone", "Bölge belirtilmedi"),
+                issue.get("time_window", "Zaman belirtilmedi"), issue.get("details", "Kanıt yok"), "İnceleme",
+            ))
+        for anomaly in anomalies:
+            _render(theme.issue_card(
+                f"Anomali · {anomaly.get('metric', 'ölçüm')}", anomaly.get("zone", "Bölge belirtilmedi"),
+                anomaly.get("time_window", "Zaman belirtilmedi"), anomaly.get("details", "Kanıt yok"), "Yüksek",
+            ))
+
+    with tab_trends:
+        _render(theme.section_title("Zaman içindeki değişim", "Günlük ve saatlik ölçüm eğilimleri"))
+        zones = sorted(df["zone"].dropna().unique().tolist())
+        selected_zone = st.selectbox("Bölge seçin", zones, key="admin_zone")
+        zone_df = df[df["zone"] == selected_zone]
+        if not zone_df.empty:
+            chart_groups = [
+                ("Günlük medyan gecikme (ms)", zone_df.groupby("day_str")["rtt_ms"].median(), theme.PALETTE["primary"]),
+                ("Saatlik medyan gecikme (ms)", zone_df.groupby("hour")["rtt_ms"].median(), theme.PALETTE["secondary"]),
+                ("Günlük medyan paket kaybı (%)", zone_df.groupby("day_str")["loss_pct"].median(), theme.PALETTE["medium"]),
+                ("Saatlik medyan paket kaybı (%)", zone_df.groupby("hour")["loss_pct"].median(), theme.PALETTE["bad"]),
+                ("Günlük medyan indirme (Mbps)", zone_df.groupby("day_str")["down_mbps"].median(), theme.PALETTE["primary"]),
+                ("Saatlik medyan indirme (Mbps)", zone_df.groupby("hour")["down_mbps"].median(), theme.PALETTE["secondary"]),
+            ]
+            for index in range(0, len(chart_groups), 2):
+                columns = st.columns(2)
+                for column, (title, series, color) in zip(columns, chart_groups[index:index + 2]):
+                    with column:
+                        _render(theme.section_title(title))
+                        _chart(series, color)
+            _render(theme.section_title("Saat × hafta günü ortalama gecikme matrisi", "Açık tonlar düşük, mor tonlar yüksek gecikmeyi gösterir."))
+            st.dataframe(_matrix_style(build_hourly_day_matrix(df, selected_zone)), use_container_width=True)
+
+    with tab_forecast:
+        _render(theme.section_title("Tahmin performansı", "Son dönem test verisiyle karşılaştırma"))
+        _render(theme.note_box(
+            "Mevsimsel yöntem (bölge, hafta içi/sonu ve saat) tek medyan taban yöntemiyle MAE üzerinden karşılaştırılır.",
+        ))
         if forecast.get("status") == "basarili":
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Test Örnek Sayısı", forecast["test_sample_count"])
-            m2.metric("Eğitim Örnek Sayısı", forecast["train_sample_count"])
-            m3.metric("Taban Model MAE", f"{forecast['mae_baseline']:.2f} ms")
-            m4.metric("Mevsimsel Model MAE", f"{forecast['mae_seasonal']:.2f} ms", f"%{forecast['improvement_pct']:.1f} iyileşme")
-
-            st.markdown("#### Bölge Bazında Tahmin Hatası Karşılaştırması")
-            comp_df = pd.DataFrame(forecast.get("zone_comparison", []))
-            if not comp_df.empty:
-                comp_df = comp_df.rename(columns={
-                    "zone": "Bölge",
-                    "test_samples": "Test Örnek",
-                    "mae_seasonal": "Mevsimsel MAE (ms)",
-                    "mae_baseline": "Taban Model MAE (ms)",
-                    "mae_difference": "Fark (Taban - Mevsimsel)",
-                })
-                st.dataframe(comp_df, use_container_width=True, hide_index=True)
-
-            # Mevsimsel yöntemin basit yöntemden DAHA KÖTÜ olduğu bölgeleri VERİDEN dinamik hesapla
+            kpis = [
+                theme.kpi_card("Test ölçümü", forecast["test_sample_count"], "Son üç günlük dönem"),
+                theme.kpi_card("Eğitim ölçümü", forecast["train_sample_count"], "Önceki dönem"),
+                theme.kpi_card("Tek medyan MAE", f"{forecast['mae_baseline']:.2f} ms", "Düşük olması daha iyidir"),
+                theme.kpi_card("Mevsimsel MAE", f"{forecast['mae_seasonal']:.2f} ms", f"İyileşme %{forecast['improvement_pct']:.1f}"),
+            ]
+            _render(f'<div class="np-grid">{"".join(kpis)}</div>')
+            comparison = pd.DataFrame(forecast.get("zone_comparison", [])).rename(columns={
+                "zone": "Bölge", "test_samples": "Test örneği",
+                "mae_seasonal": "Mevsimsel MAE (ms)",
+                "mae_baseline": "Tek medyan MAE (ms)",
+                "mae_difference": "Fark (tek medyan - mevsimsel)",
+            })
+            st.dataframe(comparison, use_container_width=True, hide_index=True)
             underperforming = find_underperforming_forecast_zones(forecast)
             if underperforming:
-                st.error("⚠️ **Mevsimsel Yöntemin Taban Çizgisinden Daha Yüksek Hata Verdiği Bölgeler:**")
-                for u in underperforming:
-                    st.markdown(
-                        f"- **{u['zone']}**: Mevsimsel MAE **{u['mae_seasonal']:.2f} ms** > Taban MAE **{u['mae_baseline']:.2f} ms** "
-                        f"(Hata artışı: +{u['mae_difference']:.2f} ms, Test örneği: {u['test_samples']})"
-                    )
-                st.markdown(
-                    "> **Açıklama:** Bu bölgelerde belirgin bir saatlik insan/yoğunluk döngüsü bulunmamakta veya sabit fiziksel sinyal kısıtı "
-                    "(kapsama boşluğu) mevcuttur. Döngüsel olmayan sabit örüntülere saatlik mevsimsellik eklemek modelin varyansını artırarak "
-                    "tahmin hatasını yükseltmektedir."
-                )
-
+                _render(theme.note_box("Mevsimsel tahminin tek medyan yönteminden daha yüksek hata verdiği bölgeler:", "warning"))
+                for item in underperforming:
+                    _render(theme.note_box(
+                        f"{item['zone']}: mevsimsel MAE {item['mae_seasonal']:.2f} ms, "
+                        f"tek medyan MAE {item['mae_baseline']:.2f} ms; fark +{item['mae_difference']:.2f} ms.", "warning",
+                    ))
         else:
-            st.info(f"Tahmin değerlendirmesi durumu: {forecast.get('status')}")
+            _render(theme.note_box(f"Tahmin sonucu: {forecast.get('status', 'bilinmiyor')}", "warning"))
+        _render(theme.note_box("Katılım yoğunluğu ağ yoğunluğu değildir."))
+        _render(theme.note_box("Tahmin simüle veride değerlendirildi; gerçek veride aynı başarı garanti değildir."))
 
-        st.markdown("---")
-        # Zorunlu Notlar
-        st.info("ℹ️ **Metodolojik Not 1:** Katılım yoğunluğu ağ yoğunluğu değildir; kullanıcıların ilgili saatte ölçüm gönderme/katılım sıklığını gösterir.")
-        st.info("ℹ️ **Metodolojik Not 2:** Tahmin simüle veride değerlendirildi, gerçek veride aynı başarı garanti değildir.")
-
-    # 5. SEKME: VERİ VE GİZLİLİK
     with tab_privacy:
-        st.subheader("Veri Güvenliği, Anonimleştirme ve Gizlilik İlkeleri")
-
-        st.markdown("""
-        NetNabız platformu, kullanıcı gizliliğini tasarım gereği korumak (Privacy by Design) üzere yapılandırılmıştır.
-        Panel hiçbir aşamada ham cihaz kimliği veya hassas kullanıcı izi barındırmaz.
-        """)
-
-        col_p1, col_p2 = st.columns(2)
-        with col_p1:
-            st.markdown("#### ✅ Veritabanında Saklanabilen Alanlar")
-            st.markdown("""
-            - **Ağ Metrikleri:** TCP RTT gecikmesi (ms), paket kaybı (%), indirme/yükleme hızı (Mbps), RSSI sinyal seviyesi (dBm).
-            - **Konum Bilgisi:** Sadece seçilen bina, kat ve bölge adı.
-            - **Güven Skoru:** IP aralığı karşılaştırmasıyla üretilen kampüs doğrulama bayrağı (`is_verified`).
-            - **Zaman Damgası:** Ölçümün alındığı UTC zaman damgası.
-            - **Wi-Fi tanımlayıcıları:** SSID ve BSSID alanları SQLite'ta ham metin olarak bulunabilir.
-            """)
-
-        with col_p2:
-            st.markdown("#### ❌ Saklanmayan veya panelde gösterilmeyen bilgiler")
-            st.markdown("""
-            - **Ham IP Adresi:** Sunucu belleğinde kampüs aralığıyla kıyaslanır ve anında imha edilir, DB'ye yazılmaz.
-            - **Ham Cihaz Kimliği (MAC/IMEI):** Saklanmaz; istemci hash üretir, sunucu bunu gizli tuz (`hash_salt`) ile HMAC-SHA256 yapar.
-            - **Kişisel Veri:** İsim, soyisim, öğrenci numarası veya web tarama geçmişi toplanmaz.
-            - **Panel görünümü:** SSID gösterilmez; BSSID yalnızca `AP-1`, `AP-2` gibi takma adlarla gösterilir. Bu maskeleme veritabanındaki ham alanı silmez.
-            """)
-
-        st.markdown("---")
-        st.markdown("#### 📅 Analize Dahil Edilen Veri Aralığı")
-        st.markdown(f"- **İlk Ölçüm:** `{meta.get('min_time')}`")
-        st.markdown(f"- **Son Ölçüm:** `{meta.get('max_time')}`")
-        st.markdown(f"- **Referans Zaman:** `{meta.get('reference_time')}`")
-        st.markdown(f"- **Doğrulanmış Kayıt Sayısı:** `{meta.get('total_records')} adet`")
-
-        st.markdown("---")
-        st.markdown("#### 🔒 Yerel Yapay Zeka Entegrasyon Güvencesi")
-        st.info(
-            "Yapay zeka (ileride) ham veriyi değil, yalnızca anonim özeti görecek. "
-            "Sistemde yerel olarak koşacak olan açık kaynaklı büyük dil modelleri (Ollama / Qwen / Gemma), "
-            "SQLite veritabanındaki tekil ölçüm satırlarına doğrudan erişmeyecektir. "
-            "Model yalnızca `analysis_summary.json` dosyasında derlenen; cihaz hash'leri, SSID'ler ve ham BSSID'lerden "
-            "tamamen arındırılmış istatistiksel özetleri (bölge puanları, tespit edilen arıza türleri ve MAE hataları) "
-            "okuyarak kullanıcıya ve jüriye Türkçe açıklamalar üretecektir."
-        )
+        _render(theme.section_title("Veri ve gizlilik", "Panel yalnızca yerel, doğrulanmış ölçümler üzerinde analiz yapar."))
+        _render('<div class="np-grid">'
+            + theme.note_box("Saklanabilen alanlar: ağ ölçümleri, seçilen bölge, zaman, doğrulama ve simülasyon bilgileri.")
+            + theme.note_box("Ham IP veritabanına yazılmaz; ham cihaz kimliği yerine sunucuda HMAC özeti saklanır.")
+            + theme.note_box("SSID ve BSSID veritabanında ham bulunabilir. Panel SSID göstermez; BSSID yerine AP takma adı gösterir.", "warning")
+            + theme.note_box("Panel tekil ölçüm satırlarını göstermez ve veri indirme sunmaz.")
+            + '</div>')
+        _render(theme.note_box(
+            f"Analiz dönemi: {meta.get('min_time')} — {meta.get('max_time')} ({meta.get('total_records')} doğrulanmış kayıt)."
+        ))
+        _render(theme.note_box(
+            "Yapay zeka (ileride) ham veriyi değil, yalnızca anonim özeti görecek. Modelin veritabanına erişimi olmayacak."
+        ))
