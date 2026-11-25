@@ -59,9 +59,9 @@ def inject_css() -> str:
     .block-container { max-width:1440px; padding-top:2.2rem; padding-bottom:4rem; }
     h1,h2,h3,h4,p,label,small { color:var(--text); }
     a { color:var(--primary); }
-    [data-testid="stTabs"] [role="tablist"] { gap:.55rem; border-bottom:1px solid var(--border); }
-    [data-testid="stTabs"] button[role="tab"] { border:1px solid transparent; border-radius:999px 999px 0 0; padding:.6rem 1rem; color:var(--muted); }
-    [data-testid="stTabs"] button[aria-selected="true"] { color:var(--text); background:var(--surface); border-color:var(--border); border-bottom-color:var(--primary); }
+    [data-testid="stTabs"] [role="tablist"] { gap:.55rem; border-bottom:0; }
+    [data-testid="stTabs"] button[role="tab"] { border:1px solid var(--border); border-radius:999px; padding:.55rem 1rem; color:var(--muted); background:var(--surface); }
+    [data-testid="stTabs"] button[aria-selected="true"] { color:var(--text); background:var(--surface-raised); border-color:var(--primary); box-shadow:0 0 0 1px color-mix(in srgb,var(--primary) 20%,transparent); }
     [data-testid="stMetric"] { background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:1rem 1.1rem; box-shadow:var(--shadow); }
     [data-testid="stMetricValue"] { color:var(--text); font-size:1.8rem; }
     [data-testid="stDataFrame"], [data-testid="stTable"] { border:1px solid var(--border); border-radius:14px; overflow:hidden; }
