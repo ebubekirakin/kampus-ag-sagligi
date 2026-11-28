@@ -14,7 +14,8 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from backend.config import load_config
-from backend.database import get_connection, init_db
+from backend.database import init_db
+from storage import get_store
 from project_utils import parse_building_floor
 
 
@@ -209,40 +210,29 @@ def create_measurement(
     # Zaman damgası: boşsa sunucu anı (UTC)
     ts = measurement.timestamp or datetime.now(timezone.utc).isoformat()
 
-    insert_sql = """
-    INSERT INTO measurements (
-        device_hash, source, ssid, bssid, rssi_dbm,
-        rtt_ms, loss_pct, down_mbps, up_mbps,
-        building, floor, zone, campus_confidence,
-        is_verified, is_simulated, timestamp
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-    """
+    record = {
+        "device_hash": stored_device_hash,
+        "source": measurement.source,
+        "ssid": measurement.ssid,
+        "bssid": measurement.bssid,
+        "rssi_dbm": measurement.rssi_dbm,
+        "rtt_ms": measurement.rtt_ms,
+        "loss_pct": measurement.loss_pct,
+        "down_mbps": measurement.down_mbps,
+        "up_mbps": measurement.up_mbps,
+        "building": building,
+        "floor": floor,
+        "zone": measurement.zone,
+        "campus_confidence": campus_confidence,
+        "is_verified": is_verified,
+        "is_simulated": measurement.is_simulated,
+        "timestamp": ts,
+    }
+
     try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                insert_sql,
-                (
-                    stored_device_hash,
-                    measurement.source,
-                    measurement.ssid,
-                    measurement.bssid,
-                    measurement.rssi_dbm,
-                    measurement.rtt_ms,
-                    measurement.loss_pct,
-                    measurement.down_mbps,
-                    measurement.up_mbps,
-                    building,
-                    floor,
-                    measurement.zone,
-                    campus_confidence,
-                    is_verified,
-                    measurement.is_simulated,
-                    ts,
-                ),
-            )
-            record_id = cursor.lastrowid
-            return {"status": "created", "id": record_id}
+        store = get_store()
+        record_id = store.insert_measurement(record)
+        return {"status": "created", "id": record_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Kayıt hatası: {str(e)}")
 
@@ -257,20 +247,11 @@ def list_measurements(
 ):
     """Paylaşılan anahtarla yetkilendirilmiş isteklere ölçümleri döner."""
     check_api_key(x_api_key)
-    query = "SELECT * FROM measurements WHERE 1=1"
-    params = []
+    store = get_store()
+    return store.fetch_measurements(
+        is_simulated=is_simulated,
+        zone=zone,
+        limit=limit,
+        offset=offset,
+    )
 
-    if is_simulated is not None:
-        query += " AND is_simulated = ?"
-        params.append(is_simulated)
-
-    if zone is not None:
-        query += " AND zone = ?"
-        params.append(zone)
-
-    query += " ORDER BY id DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
-
-    with get_connection() as conn:
-        rows = conn.execute(query, params).fetchall()
-        return [dict(row) for row in rows]

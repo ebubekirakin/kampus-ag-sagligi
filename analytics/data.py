@@ -1,14 +1,15 @@
 """
 NetNabız Analiz Veri Yükleme Modülü.
-SQLite veritabanından doğrudan ve salt okunur biçimde ölçümleri okur,
+Depolama katmanı (MeasurementStore) üzerinden salt okunur biçimde ölçümleri okur,
 zaman damgalarını yerel saat dilimine göre ayrıştırır.
 """
 
 from pathlib import Path
-import sqlite3
 import pandas as pd
 
 from backend.config import BASE_DIR, load_config
+from storage import get_store
+from storage.sqlite_store import SQLiteMeasurementStore
 
 
 def get_db_path() -> Path:
@@ -25,7 +26,7 @@ def load_measurements(
     db_path: Path | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """
-    SQLite veritabanından ölçüm verilerini yükler ve analiz için hazırlar.
+    Veritabanından ölçüm verilerini yükler ve analiz için hazırlar.
 
     Parametreler:
         data_type: 'simulated' (is_simulated=1), 'real' (is_simulated=0) veya 'all'
@@ -50,33 +51,12 @@ def load_measurements(
     effective_offset = 0 if data_type == "simulated" else utc_offset_hours
     time_basis = "UTC" if effective_offset == 0 else f"UTC{effective_offset:+g}"
 
-    query = "SELECT * FROM measurements WHERE 1=1"
+    if db_path is not None:
+        store = SQLiteMeasurementStore(db_path=target_db)
+    else:
+        store = get_store(config)
 
-    if data_type == "simulated":
-        query += " AND is_simulated = 1"
-    elif data_type == "real":
-        query += " AND is_simulated = 0"
-    elif data_type != "all":
-        raise ValueError(f"Geçersiz data_type: {data_type}. 'simulated', 'real' veya 'all' olmalı.")
-
-    if verified_only:
-        query += " AND is_verified = 1"
-
-    query += " ORDER BY id ASC"
-
-    # Windows yollarını da doğru kaçışlayan URI ile salt okunur aç.
-    uri = f"{target_db.resolve().as_uri()}?mode=ro"
-    try:
-        conn = sqlite3.connect(uri, uri=True)
-    except sqlite3.Error as error:
-        raise RuntimeError(
-            f"Veritabanı salt okunur açılamadı: {target_db}"
-        ) from error
-
-    try:
-        df = pd.read_sql_query(query, conn)
-    finally:
-        conn.close()
+    df = store.load_dataframe(data_kind=data_type, verified_only=verified_only)
 
     if df.empty:
         return df, {
@@ -118,5 +98,6 @@ def load_measurements(
         "min_time": min_time,
         "max_time": reference_time,
     }
+
 
     return df, metadata

@@ -33,11 +33,17 @@ class TestServerSecurity(unittest.TestCase):
         """Her test için geçici veritabanı ve yapılandırma kullanır."""
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "test.db"
-            selected_config = config or self.config
-            with patch.object(database, "get_db_path", return_value=db_path):
-                with patch("backend.main.load_config", return_value=selected_config):
-                    database.init_db()
-                    yield
+            selected_config = dict(config or self.config)
+            selected_config["database_path"] = str(db_path)
+            from storage.sqlite_store import SQLiteMeasurementStore
+            store = SQLiteMeasurementStore(db_path=db_path)
+            with patch("storage.get_store", return_value=store):
+                with patch("backend.database.get_store", return_value=store):
+                    with patch("backend.main.get_store", return_value=store):
+                        with patch("backend.main.load_config", return_value=selected_config):
+                            database.init_db()
+                            self._current_store = store
+                            yield
 
     def make_request(self, host="192.0.2.10", forwarded_for=None):
         """Endpoint fonksiyonlarına küçük bir sahte istemci adresi verir."""
@@ -61,11 +67,9 @@ class TestServerSecurity(unittest.TestCase):
 
     def read_device_hashes(self):
         """Geçici veritabanına yazılan cihaz hash'lerini döndürür."""
-        with database.get_connection() as connection:
-            rows = connection.execute(
-                "SELECT device_hash FROM measurements ORDER BY id"
-            ).fetchall()
-        return [row["device_hash"] for row in rows]
+        rows = self._current_store.fetch_measurements(limit=1000)
+        return [row["device_hash"] for row in reversed(rows)]
+
 
     def test_salt_changes_value_stored_in_database(self):
         """Sunucunun sakladığı HMAC, istemcinin gönderdiği değerden farklıdır."""
@@ -120,13 +124,11 @@ class TestServerSecurity(unittest.TestCase):
                 ),
                 self.api_key,
             )
-            with database.get_connection() as connection:
-                row = connection.execute(
-                    "SELECT campus_confidence, is_verified FROM measurements"
-                ).fetchone()
+            rows = self._current_store.fetch_measurements(limit=1)
+            row = rows[0] if rows else {}
 
-        self.assertEqual(row["campus_confidence"], 0.0)
-        self.assertEqual(row["is_verified"], 0)
+        self.assertEqual(row.get("campus_confidence"), 0.0)
+        self.assertEqual(row.get("is_verified"), 0)
 
     def test_simulated_measurement_preserves_client_confidence(self):
         """Simüle kayıtta gelen güven ve doğrulama değerleri korunur."""
@@ -138,13 +140,12 @@ class TestServerSecurity(unittest.TestCase):
                 self.make_request(),
                 self.api_key,
             )
-            with database.get_connection() as connection:
-                row = connection.execute(
-                    "SELECT campus_confidence, is_verified FROM measurements"
-                ).fetchone()
+            rows = self._current_store.fetch_measurements(limit=1)
+            row = rows[0] if rows else {}
 
-        self.assertEqual(row["campus_confidence"], 0.15)
-        self.assertEqual(row["is_verified"], 0)
+        self.assertEqual(row.get("campus_confidence"), 0.15)
+        self.assertEqual(row.get("is_verified"), 0)
+
 
     def test_campus_confidence_uses_only_configured_ip_rules(self):
         """Kampüs IP aralığı ve geliştirme modundaki yerel adresler tanınır."""
@@ -206,13 +207,12 @@ class TestServerSecurity(unittest.TestCase):
                 self.make_request(),
                 self.api_key,
             )
-            with database.get_connection() as connection:
-                row = connection.execute(
-                    "SELECT building, floor FROM measurements"
-                ).fetchone()
+            rows = self._current_store.fetch_measurements(limit=1)
+            row = rows[0] if rows else {}
 
-        self.assertEqual(row["building"], "Kütüphane")
-        self.assertEqual(row["floor"], "1. Kat")
+        self.assertEqual(row.get("building"), "Kütüphane")
+        self.assertEqual(row.get("floor"), "1. Kat")
+
 
 
 if __name__ == "__main__":

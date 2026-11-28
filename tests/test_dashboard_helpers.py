@@ -189,21 +189,28 @@ class TestMatrixAndMasking:
         assert matrix.loc["10:00", "Pazartesi"] == 20.0
 
     def test_record_counts_include_verified_and_unverified(self, tmp_path):
-        import sqlite3
+        from storage.sqlite_store import SQLiteMeasurementStore
 
         db_path = tmp_path / "counts.db"
-        with sqlite3.connect(db_path) as connection:
-            connection.execute(
-                "CREATE TABLE measurements (is_verified INTEGER, is_simulated INTEGER)"
-            )
-            connection.executemany(
-                "INSERT INTO measurements VALUES (?, ?)",
-                [(1, 1), (0, 1), (1, 0)],
-            )
+        store = SQLiteMeasurementStore(db_path=db_path)
+        store.init_schema()
+        store.insert_measurement({
+            "device_hash": "d1", "zone": "Z", "timestamp": "2026-11-20T10:00:00Z",
+            "is_verified": 1, "is_simulated": 1,
+        })
+        store.insert_measurement({
+            "device_hash": "d2", "zone": "Z", "timestamp": "2026-11-20T10:01:00Z",
+            "is_verified": 0, "is_simulated": 1,
+        })
+        store.insert_measurement({
+            "device_hash": "d3", "zone": "Z", "timestamp": "2026-11-20T10:02:00Z",
+            "is_verified": 1, "is_simulated": 0,
+        })
         assert get_record_counts("all", db_path) == {
             "total": 3, "verified": 2, "unverified": 1, "simulated": 2, "real": 1
         }
         assert get_record_counts("simulated", db_path)["total"] == 2
+
 
     def test_prepare_masked_issues_and_anomalies(self):
         issues = [{"title": "Arıza", "bssid": "02:00:00:03:00:02", "details": "AP 02:00:00:03:00:02 sorunlu"}]

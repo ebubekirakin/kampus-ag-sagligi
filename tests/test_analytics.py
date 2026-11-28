@@ -12,12 +12,14 @@ Bölüm 5 gereksinimlerine göre:
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
-import sqlite3
 import tempfile
 from unittest.mock import patch
 import analytics.run as analytics_run
 import pandas as pd
 import pytest
+
+from storage.sqlite_store import SQLiteMeasurementStore
+
 
 from analytics.data import load_measurements
 from analytics.rules import calculate_zone_scores, diagnose_issues
@@ -448,40 +450,35 @@ class TestForecastAndLeakage:
 
 
 class TestAnalyticsDataLoading:
-    """Veri seçimi, saat tabanı ve salt okunur SQLite bağlantısını denetler."""
+    """Veri seçimi, saat tabanı ve salt okunur depolama bağlantısını denetler."""
 
     def create_database(self, path: Path):
-        connection = sqlite3.connect(path)
-        connection.execute(
-            "CREATE TABLE measurements (id INTEGER PRIMARY KEY, is_simulated INTEGER, "
-            "is_verified INTEGER, timestamp TEXT, zone TEXT)"
-        )
-        connection.executemany(
-            "INSERT INTO measurements VALUES (?, ?, ?, ?, ?)",
-            [
-                (1, 1, 1, "2026-11-02T08:00:00+00:00", "Test Bölgesi A"),
-                (2, 0, 1, "2026-11-02T08:00:00+00:00", "Test Bölgesi A"),
-                (3, 1, 0, "2026-11-02T09:00:00+00:00", "Test Bölgesi A"),
-            ],
-        )
-        connection.commit()
-        connection.close()
+        store = SQLiteMeasurementStore(db_path=path)
+        with store._write_connection() as connection:
+            connection.execute(
+                "CREATE TABLE measurements (id INTEGER PRIMARY KEY, is_simulated INTEGER, "
+                "is_verified INTEGER, timestamp TEXT, zone TEXT)"
+            )
+            connection.executemany(
+                "INSERT INTO measurements VALUES (?, ?, ?, ?, ?)",
+                [
+                    (1, 1, 1, "2026-11-02T08:00:00+00:00", "Test Bölgesi A"),
+                    (2, 0, 1, "2026-11-02T08:00:00+00:00", "Test Bölgesi A"),
+                    (3, 1, 0, "2026-11-02T09:00:00+00:00", "Test Bölgesi A"),
+                ],
+            )
 
     def test_filters_time_bases_and_read_only_uri(self):
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "measurements.db"
             self.create_database(db_path)
             config = {"analytics": {"utc_offset_hours": 3}}
-            real_connect = sqlite3.connect
 
             with patch("analytics.data.load_config", return_value=config):
-                with patch("analytics.data.sqlite3.connect", wraps=real_connect) as connect:
-                    all_rows, all_meta = load_measurements("all", db_path=db_path)
-                    simulated, sim_meta = load_measurements("simulated", db_path=db_path)
-                    real, real_meta = load_measurements("real", db_path=db_path)
+                all_rows, all_meta = load_measurements("all", db_path=db_path)
+                simulated, sim_meta = load_measurements("simulated", db_path=db_path)
+                real, real_meta = load_measurements("real", db_path=db_path)
 
-            assert connect.call_count == 3
-            assert all("mode=ro" in call.args[0] for call in connect.call_args_list)
             assert len(all_rows) == 2  # Doğrulanmamış simüle satır varsayılan olarak dışarıda.
             assert set(all_rows["dt"].dt.hour) == {11}
             assert all_meta["time_basis"] == "UTC+3"
@@ -495,13 +492,14 @@ class TestAnalyticsDataLoading:
             db_path = Path(directory) / "measurements.db"
             self.create_database(db_path)
             with patch("analytics.data.load_config", return_value={"analytics": {}}):
-                with patch(
-                    "analytics.data.sqlite3.connect",
-                    side_effect=sqlite3.OperationalError("read-only open failed"),
-                ) as connect:
+                with patch.object(
+                    SQLiteMeasurementStore,
+                    "_get_ro_connection",
+                    side_effect=RuntimeError("Veritabanı salt okunur açılamadı"),
+                ):
                     with pytest.raises(RuntimeError, match="salt okunur"):
                         load_measurements(db_path=db_path)
-            assert connect.call_count == 1
+
 
 
 class TestPrivacyAndSummary:

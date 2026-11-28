@@ -27,3 +27,20 @@ Saatlik ölçüm sayısı, kullanıcıların ölçüm gönderme/katılım yoğun
 ## SSID ve BSSID saklama
 
 Veritabanı şemasında SSID ve BSSID alanları ham metin olarak tutulabilir. Analiz özeti BSSID yerine AP takma adı yazar ve terminal analiz çıktısı da takma ad kullanır; ancak bu, veritabanındaki ham alanları anonimleştirmez.
+
+## SQLite ve Dağıtık Kullanım Sınırı
+
+SQLite dosya tabanlı bir veritabanıdır ve tek bir sunucu/makine üzerinde çalışmak üzere tasarlanmıştır. Eşzamanlı yazma işlemlerinde WAL modu performansı artırsa da birden fazla sunucunun ortak veritabanı dosyasına yazması dosya kilidi sorunlarına yol açar. Çok sunuculu dağıtık mimariler için PostgreSQL gibi istemci-sunucu mimarili bir veritabanına geçilmelidir.
+
+## Streamlit Paneli ve Eşzamanlı Kullanıcı Sınırı
+
+Streamlit web arayüzü, yönetici analitiği ve hafif etkileşimli görselleştirme için uygundur; binlerce öğrencinin aynı anda bağlandığı yüksek trafikli web uygulamaları için tasarlanmamıştır. Çok kullanıcılı yoğun erişimlerde panel performansı düşebilir.
+
+## Görünüm Yetkilendirme Değildir
+
+Paneldeki "Öğrenci" ve "Yönetici" görünümleri yalnızca arayüz perspektifini değiştiren bir filtrelemedir; arkasında parola veya rol tabanlı gerçek bir yetkilendirme (RBAC) bulunmaz. Panel kampüs geneline veya internete açılacaksa önüne kurumsal bir kimlik doğrulama / giriş sistemi (SSO, OAuth2 vb.) eklenmelidir.
+
+## Ölçümlerin Ağ Üzerindeki Kendi Yükü
+
+İstemcinin yaptığı gecikme, paket kaybı ve özellikle bant genişliği (indirme/yükleme) hız testleri ağ üzerinde anlık bir veri trafiği oluşturur. Yüzlerce cihazın aynı anda hız testi yapması ağ sağlığını ölçerken ağın kendisini tıkayabilir. Bu nedenle istemci ölçüm sıklığı makul aralıklarda tutulmalıdır.
+

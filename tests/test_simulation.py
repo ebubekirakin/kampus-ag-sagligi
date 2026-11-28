@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -10,11 +9,13 @@ from datetime import datetime
 
 from backend import database
 from backend.config import load_config
+from storage.sqlite_store import SQLiteMeasurementStore
 from data.generate_simulated import (
     generate_measurements,
     get_ground_truth_scenarios,
     save_ground_truth,
 )
+
 
 
 class TestSimulation(unittest.TestCase):
@@ -109,47 +110,44 @@ class TestDatabaseMigration(unittest.TestCase):
     def test_old_table_migrates_without_losing_rows_and_accepts_missing_metrics(self):
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "legacy.db"
-            connection = sqlite3.connect(db_path)
-            connection.execute("""
-                CREATE TABLE measurements (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    device_hash TEXT NOT NULL,
-                    source TEXT NOT NULL DEFAULT 'desktop',
-                    ssid TEXT, bssid TEXT, rssi_dbm REAL,
-                    rtt_ms REAL NOT NULL, loss_pct REAL NOT NULL,
-                    down_mbps REAL NOT NULL, up_mbps REAL NOT NULL,
-                    building TEXT, floor TEXT, zone TEXT NOT NULL,
-                    campus_confidence REAL NOT NULL DEFAULT 1.0,
-                    is_verified INTEGER NOT NULL DEFAULT 1,
-                    timestamp TEXT NOT NULL
-                )
-            """)
-            connection.execute(
-                "INSERT INTO measurements "
-                "(device_hash, rtt_ms, loss_pct, down_mbps, up_mbps, zone, timestamp) "
-                "VALUES ('existing-hash', 23, 0, 40, 10, 'Bölge', '2026-11-18T10:00:00Z')"
-            )
-            connection.commit()
-            connection.close()
-
-            with patch.object(database, "get_db_path", return_value=db_path):
-                database.init_db()
-                with database.get_connection() as connection:
-                    row = connection.execute(
-                        "SELECT device_hash, rtt_ms, is_simulated FROM measurements"
-                    ).fetchone()
-                    connection.execute(
-                        "INSERT INTO measurements "
-                        "(device_hash, zone, timestamp, rtt_ms) VALUES (?, ?, ?, ?)",
-                        ("new-hash", "Bölge", "2026-11-18T10:01:00Z", None),
+            store = SQLiteMeasurementStore(db_path=db_path)
+            with store._write_connection() as connection:
+                connection.execute("""
+                    CREATE TABLE measurements (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        device_hash TEXT NOT NULL,
+                        source TEXT NOT NULL DEFAULT 'desktop',
+                        ssid TEXT, bssid TEXT, rssi_dbm REAL,
+                        rtt_ms REAL NOT NULL, loss_pct REAL NOT NULL,
+                        down_mbps REAL NOT NULL, up_mbps REAL NOT NULL,
+                        building TEXT, floor TEXT, zone TEXT NOT NULL,
+                        campus_confidence REAL NOT NULL DEFAULT 1.0,
+                        is_verified INTEGER NOT NULL DEFAULT 1,
+                        timestamp TEXT NOT NULL
                     )
-                    null_metric = connection.execute(
-                        "SELECT rtt_ms, is_simulated FROM measurements WHERE device_hash = ?",
-                        ("new-hash",),
-                    ).fetchone()
+                """)
+                connection.execute(
+                    "INSERT INTO measurements "
+                    "(device_hash, rtt_ms, loss_pct, down_mbps, up_mbps, zone, timestamp) "
+                    "VALUES ('existing-hash', 23, 0, 40, 10, 'Bölge', '2026-11-18T10:00:00Z')"
+                )
 
-            self.assertEqual(tuple(row), ("existing-hash", 23.0, 0))
-            self.assertEqual(tuple(null_metric), (None, 0))
+            with patch("storage.get_store", return_value=store):
+                with patch("backend.database.get_store", return_value=store):
+                    store.init_schema()
+                    store.insert_measurement({
+                        "device_hash": "new-hash", "zone": "Bölge", "timestamp": "2026-11-18T10:01:00Z",
+                        "rtt_ms": None,
+                    })
+                    rows = store.fetch_measurements(limit=10)
+
+            # fetch_measurements ORDER BY id DESC olduğu için son eklenen ilk sıradadır
+            row_new = next(r for r in rows if r["device_hash"] == "new-hash")
+            row_old = next(r for r in rows if r["device_hash"] == "existing-hash")
+
+            self.assertEqual((row_old["device_hash"], row_old["rtt_ms"], row_old["is_simulated"]), ("existing-hash", 23.0, 0))
+            self.assertEqual((row_new["rtt_ms"], row_new["is_simulated"]), (None, 0))
+
 
 
 class TestBackendEndpoints(unittest.TestCase):
@@ -160,48 +158,52 @@ class TestBackendEndpoints(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "api.db"
-            with patch.object(database, "get_db_path", return_value=db_path):
-                database.init_db()
-                config = load_config()
-                config = dict(config)
-                config["hash_salt"] = "unit-test-hmac-key"
-                valid_zone = config["zones"][0]
-                payload = MeasurementCreate(
-                    device_hash="test-hash",
-                    rtt_ms=None,
-                    loss_pct=None,
-                    down_mbps=None,
-                    up_mbps=None,
-                    zone=valid_zone,
-                )
-                request = SimpleNamespace(
-                    client=SimpleNamespace(host="127.0.0.1")
-                )
-
+            config = dict(load_config())
+            config["database_path"] = str(db_path)
+            config["hash_salt"] = "unit-test-hmac-key"
+            store = SQLiteMeasurementStore(db_path=db_path)
+            with patch("backend.config.load_config", return_value=config):
                 with patch("backend.main.load_config", return_value=config):
-                    with self.assertRaises(HTTPException) as unauthorized:
-                        create_measurement(payload, request, None)
-                    self.assertEqual(unauthorized.exception.status_code, 401)
+                    with patch("storage.get_store", return_value=store):
+                        with patch("backend.main.get_store", return_value=store):
+                            database.init_db()
+                            valid_zone = config["zones"][0]
+                            payload = MeasurementCreate(
+                                device_hash="test-hash",
+                                rtt_ms=None,
+                                loss_pct=None,
+                                down_mbps=None,
+                                up_mbps=None,
+                                zone=valid_zone,
+                            )
+                            request = SimpleNamespace(
+                                client=SimpleNamespace(host="127.0.0.1")
+                            )
 
-                    response = create_measurement(
-                        payload, request, config["api_key"]
-                    )
-                    self.assertEqual(response["status"], "created")
+                            with self.assertRaises(HTTPException) as unauthorized:
+                                create_measurement(payload, request, None)
+                            self.assertEqual(unauthorized.exception.status_code, 401)
 
-                    with self.assertRaises(HTTPException) as unauthorized_get:
-                        list_measurements(x_api_key=None)
-                    self.assertEqual(unauthorized_get.exception.status_code, 401)
+                            response = create_measurement(
+                                payload, request, config["api_key"]
+                            )
+                            self.assertEqual(response["status"], "created")
 
-                    rows = list_measurements(
-                        limit=100,
-                        offset=0,
-                        is_simulated=0,
-                        zone=None,
-                        x_api_key=config["api_key"],
-                    )
-                self.assertEqual(len(rows), 1)
-                self.assertEqual(rows[0]["is_simulated"], 0)
-                self.assertIsNone(rows[0]["rtt_ms"])
+                            with self.assertRaises(HTTPException) as unauthorized_get:
+                                list_measurements(x_api_key=None)
+                            self.assertEqual(unauthorized_get.exception.status_code, 401)
+
+                            rows = list_measurements(
+                                limit=100,
+                                offset=0,
+                                is_simulated=0,
+                                zone=None,
+                                x_api_key=config["api_key"],
+                            )
+                        self.assertEqual(len(rows), 1)
+                        self.assertEqual(rows[0]["is_simulated"], 0)
+                        self.assertIsNone(rows[0]["rtt_ms"])
+
 
 
 if __name__ == "__main__":

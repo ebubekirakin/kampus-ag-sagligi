@@ -7,6 +7,12 @@ campus_ip_ranges = []
 # true iken yerel adresler kampüs ağı sayılır.
 dev_mode = true
 
+[storage]
+backend = "sqlite"
+busy_timeout_ms = 5000
+wal_mode = true
+
+
 # Ölçümlerde seçilebilecek örnek bölgeler.
 zones = [
   "Kütüphane 1. kat Okuma salonu",
