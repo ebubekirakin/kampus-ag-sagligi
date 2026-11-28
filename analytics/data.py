@@ -7,16 +7,8 @@ zaman damgalarını yerel saat dilimine göre ayrıştırır.
 from pathlib import Path
 import pandas as pd
 
-from backend.config import BASE_DIR, load_config
+from backend.config import load_config
 from storage import get_store
-from storage.sqlite_store import SQLiteMeasurementStore
-
-
-def get_db_path() -> Path:
-    """Veritabanı dosya yolunu yapılandırmadan okur."""
-    config = load_config()
-    db_relative = config.get("database_path", "data/netnabiz.db")
-    return BASE_DIR / db_relative
 
 
 def load_measurements(
@@ -40,10 +32,6 @@ def load_measurements(
     if data_type not in ("simulated", "real", "all"):
         raise ValueError("data_type 'simulated', 'real' veya 'all' olmalı.")
 
-    target_db = db_path or get_db_path()
-    if not target_db.exists():
-        raise FileNotFoundError(f"Veritabanı dosyası bulunamadı: {target_db}")
-
     config = load_config()
     analytics_cfg = config.get("analytics", {})
     if utc_offset_hours is None:
@@ -51,10 +39,11 @@ def load_measurements(
     effective_offset = 0 if data_type == "simulated" else utc_offset_hours
     time_basis = "UTC" if effective_offset == 0 else f"UTC{effective_offset:+g}"
 
+    # Testler de özel DB yolunu depolama fabrikasına verir; SQLite sınıfını bilmez.
+    store_config = dict(config)
     if db_path is not None:
-        store = SQLiteMeasurementStore(db_path=target_db)
-    else:
-        store = get_store(config)
+        store_config["database_path"] = str(Path(db_path).resolve())
+    store = get_store(store_config)
 
     df = store.load_dataframe(data_kind=data_type, verified_only=verified_only)
 

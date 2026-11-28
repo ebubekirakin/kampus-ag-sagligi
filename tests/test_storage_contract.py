@@ -1,6 +1,7 @@
 """Depolama katmanı sözleşme (contract) ve mimari denetim testleri."""
 
 from pathlib import Path
+import re
 import tempfile
 import pytest
 import pandas as pd
@@ -9,13 +10,20 @@ from storage.base import MeasurementStore
 from storage.sqlite_store import SQLiteMeasurementStore
 
 
-@pytest.fixture
-def temp_store(tmp_path: Path) -> MeasurementStore:
-    """Geçici SQLite veritabanı ile başlatılmış store döner."""
+@pytest.fixture(params=["sqlite"], ids=["sqlite"])
+def temp_store(request, tmp_path: Path) -> MeasurementStore:
+    """Sözleşmeyi kayıtlı depo uygulamalarında geçici DB ile çalıştırır."""
     db_file = tmp_path / "contract_test.db"
-    store = SQLiteMeasurementStore(db_path=db_file, busy_timeout_ms=3000, wal_mode=True)
+    # Yeni bir depo eklenince fabrika bu listeye eklenir; sözleşme testleri aynen çalışır.
+    factories = {
+        "sqlite": lambda: SQLiteMeasurementStore(
+            db_path=db_file, busy_timeout_ms=3000, wal_mode=True
+        ),
+    }
+    store = factories[request.param]()
     store.init_schema()
     return store
+
 
 
 class TestStorageContract:
@@ -146,8 +154,11 @@ class TestStorageContract:
         df_sim = temp_store.load_dataframe(data_kind="simulated", verified_only=True)
         assert len(df_sim) == 1
         assert df_sim.iloc[0]["device_hash"] == "h1"
-        assert "rtt_ms" in df_sim.columns
-        assert "timestamp" in df_sim.columns
+        assert list(df_sim.columns) == [
+            "id", "device_hash", "source", "ssid", "bssid", "rssi_dbm",
+            "rtt_ms", "loss_pct", "down_mbps", "up_mbps", "building", "floor",
+            "zone", "campus_confidence", "is_verified", "is_simulated", "timestamp",
+        ]
 
         df_all_verified = temp_store.load_dataframe(data_kind="all", verified_only=True)
         assert len(df_all_verified) == 2
@@ -155,15 +166,41 @@ class TestStorageContract:
         df_all_unfiltered = temp_store.load_dataframe(data_kind="all", verified_only=False)
         assert len(df_all_unfiltered) == 3
 
-    def test_read_only_connection_rejects_writes(self, temp_store: MeasurementStore):
-        # SQLiteMeasurementStore._get_ro_connection() ile dönen bağlantıdan yazma denenirse reddedilmeli
-        if isinstance(temp_store, SQLiteMeasurementStore):
-            conn = temp_store._get_ro_connection()
-            try:
-                with pytest.raises(Exception):
-                    conn.execute("INSERT INTO measurements (device_hash, zone, timestamp) VALUES ('x', 'y', 'z')")
-            finally:
-                conn.close()
+
+class TestSQLiteSpecificBehavior:
+    """SQLite sürücüsüne özgü bağlantı ve PRAGMA kontrolleri."""
+
+    def test_read_only_connection_rejects_writes(self, tmp_path: Path):
+        store = SQLiteMeasurementStore(db_path=tmp_path / "read_only.db")
+        store.init_schema()
+        conn = store._get_ro_connection()
+        try:
+            with pytest.raises(Exception) as error:
+                conn.execute(
+                    "INSERT INTO measurements (device_hash, zone, timestamp) VALUES (?, ?, ?)",
+                    ("x", "y", "z"),
+                )
+            assert error.type.__name__ == "OperationalError"
+        finally:
+            conn.close()
+
+    @pytest.mark.parametrize(
+        "wal_mode,expected_mode", [(True, "wal"), (False, "delete")]
+    )
+    def test_journal_mode_and_busy_timeout_are_active(
+        self, tmp_path: Path, wal_mode: bool, expected_mode: str
+    ):
+        store = SQLiteMeasurementStore(
+            db_path=tmp_path / f"wal_{wal_mode}.db", busy_timeout_ms=3000,
+            wal_mode=wal_mode,
+        )
+        store.init_schema()
+        conn = store._get_ro_connection()
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == expected_mode
+            assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 3000
+        finally:
+            conn.close()
 
 
 class TestArchitectureRules:
@@ -191,4 +228,38 @@ class TestArchitectureRules:
                     forbidden_hits.append(f"{py_file.relative_to(project_root)}:{idx} -> {clean_line}")
 
         assert not forbidden_hits, f"storage/ dışında doğrudan sqlite3 importu tespit edildi:\n" + "\n".join(forbidden_hits)
+
+    def test_application_does_not_import_concrete_sqlite_store(self):
+        project_root = Path(__file__).resolve().parent.parent
+        app_dirs = ("backend", "analytics", "dashboard", "tools")
+        offenders = []
+        for directory in app_dirs:
+            for py_file in (project_root / directory).rglob("*.py"):
+                if "SQLiteMeasurementStore" in py_file.read_text(encoding="utf-8"):
+                    offenders.append(str(py_file.relative_to(project_root)))
+        assert not offenders, "Uygulama modülleri concrete SQLite sınıfına bağlı: " + ", ".join(offenders)
+
+    def test_application_sql_statements_are_confined_to_storage(self):
+        project_root = Path(__file__).resolve().parent.parent
+        app_dirs = ("backend", "analytics", "dashboard", "tools")
+        sql_pattern = re.compile(
+            r"\b(SELECT|INSERT\s+INTO|UPDATE\s+\w+|DELETE\s+FROM|"
+            r"CREATE\s+TABLE|ALTER\s+TABLE|DROP\s+TABLE|PRAGMA)\b",
+            re.IGNORECASE,
+        )
+        offenders = []
+        for directory in app_dirs:
+            for py_file in (project_root / directory).rglob("*.py"):
+                for line_number, line in enumerate(
+                    py_file.read_text(encoding="utf-8").splitlines(), start=1
+                ):
+                    if sql_pattern.search(line):
+                        offenders.append(
+                            f"{py_file.relative_to(project_root)}:{line_number}"
+                        )
+        assert not offenders, "Depolama dışı SQL bulundu: " + ", ".join(offenders)
+
+    def test_store_factory_reports_unknown_backend_in_turkish(self):
+        with pytest.raises(ValueError, match="Desteklenmeyen veritabanı depolama motoru"):
+            get_store({"storage": {"backend": "unknown"}})
 

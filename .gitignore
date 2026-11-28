@@ -4,6 +4,7 @@ __pycache__/
 *.db-wal
 *.db-shm
 data/loadtest.db*
+data/loadtest_tmp_*/
 config.toml
 !.streamlit/config.toml
 data/raw/

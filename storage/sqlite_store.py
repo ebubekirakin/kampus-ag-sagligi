@@ -54,6 +54,8 @@ class SQLiteMeasurementStore:
 
     def __init__(self, db_path: str | Path, busy_timeout_ms: int = 5000, wal_mode: bool = True):
         self.db_path = Path(db_path).resolve()
+        if not isinstance(busy_timeout_ms, int) or busy_timeout_ms < 0:
+            raise ValueError("busy_timeout_ms sıfır veya pozitif bir tam sayı olmalı.")
         self.busy_timeout_ms = busy_timeout_ms
         self.wal_mode = wal_mode
 
@@ -67,8 +69,17 @@ class SQLiteMeasurementStore:
         conn.row_factory = sqlite3.Row
         try:
             conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms};")
-            if self.wal_mode:
-                conn.execute("PRAGMA journal_mode = WAL;")
+            expected_timeout = conn.execute("PRAGMA busy_timeout;").fetchone()[0]
+            if expected_timeout != self.busy_timeout_ms:
+                raise RuntimeError("SQLite busy_timeout ayarı etkinleştirilemedi.")
+
+            # İstenen günlük modunu ayarla ve SQLite yanıtından doğrula.
+            journal_mode = "WAL" if self.wal_mode else "DELETE"
+            actual_mode = conn.execute(f"PRAGMA journal_mode = {journal_mode};").fetchone()[0]
+            if actual_mode.casefold() != journal_mode.casefold():
+                raise RuntimeError(
+                    f"SQLite journal_mode {journal_mode} olarak ayarlanamadı; etkin mod: {actual_mode}."
+                )
             yield conn
             conn.commit()
         except Exception:
@@ -79,7 +90,7 @@ class SQLiteMeasurementStore:
 
     def _get_ro_connection(self) -> sqlite3.Connection:
         if not self.db_path.exists():
-            raise RuntimeError(f"Veritabanı dosyası bulunamadı: {self.db_path}")
+            raise FileNotFoundError(f"Veritabanı dosyası bulunamadı: {self.db_path}")
         uri = f"{self.db_path.as_uri()}?mode=ro"
         try:
             conn = sqlite3.connect(uri, uri=True, timeout=self.busy_timeout_ms / 1000.0)

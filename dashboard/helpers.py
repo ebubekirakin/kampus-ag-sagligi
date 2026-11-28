@@ -183,17 +183,16 @@ def build_hourly_day_matrix(df: pd.DataFrame, zone: str) -> pd.DataFrame:
 
 def get_record_counts(data_type: str, db_path: str | Path | None = None) -> dict[str, int]:
     """Seçili veri türünün özet sayılarını depolama katmanından salt okunur alır."""
-    from analytics.data import get_db_path
+    from backend.config import load_config
     from storage import get_store
-    from storage.sqlite_store import SQLiteMeasurementStore
 
     if data_type not in ("simulated", "real", "all"):
         raise ValueError("data_type simulated, real veya all olmalı.")
 
+    config = dict(load_config())
     if db_path is not None:
-        store = SQLiteMeasurementStore(db_path=Path(db_path))
-    else:
-        store = get_store()
+        config["database_path"] = str(Path(db_path).resolve())
+    store = get_store(config)
 
     return store.count_summary(data_kind=data_type)
 
